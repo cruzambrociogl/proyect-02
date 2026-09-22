@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server - images being served</title>
+  <link rel="stylesheet" href="/shared/style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>Image server</h1>
+    <span class="meta" id="status">connecting…</span>
+    <span class="spacer"></span>
+    <a href="/viewer">open the viewer →</a>
+  </header>
+
+  <main>
+    <section style="margin-bottom: 22px">
+      <h2>Add an image</h2>
+      <div class="row">
+        <input type="file" id="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.bmp">
+        <button id="upload" class="primary" disabled>Upload</button>
+        <span id="uploadStatus" class="dim"></span>
+      </div>
+      <progress id="uploadProgress" value="0" max="100" hidden></progress>
+    </section>
+
+    <h2>Images in this folder</h2>
+    <div class="grid" id="grid"></div>
+    <p class="empty" id="empty" hidden>
+      No images yet. Upload one above, or drop files into the server's images folder.
+    </p>
+  </main>
+
+  <script type="module" src="/admin/admin.js"></script>
+</body>
+</html>
