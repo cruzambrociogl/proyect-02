@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project 2 — image catalog</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="picker-page">
+
+  <header class="top">
+    <h1>Project 2</h1>
+    <p>Ultra-high-resolution image server &middot; pick an image to explore</p>
+  </header>
+
+  <section id="drop" class="drop">
+    <input type="file" id="file" accept=".jpg,.jpeg,.png,.tif,.tiff" hidden>
+    <div class="drop-inner">
+      <b>Drop an image here</b>
+      <span>or <button type="button" id="browse" class="link">choose a file</button> &middot; JPG, PNG or TIFF &middot; streamed straight to disk, no size limit</span>
+      <div id="progress" class="progress" hidden><div id="bar"></div></div>
+      <div id="uploadMsg" class="msg"></div>
+    </div>
+  </section>
+
+  <main id="grid" class="grid">
+    <p class="empty">loading catalog…</p>
+  </main>
+
+  <footer class="foot">
+    Images are read from the server's <code id="dirHint">images/</code> directory —
+    dropping files there directly works too, no restart needed.
+  </footer>
+
+<script src="picker.js"></script>
+</body>
+</html>

@@ -1,0 +1,1024 @@
+
+---GROK---------------------------------------
+**Key constraints from the project + your requirements**
+
+- Server in Java (async, multi-client).
+- Own custom protocol (on top of initial HTTP) for image control/resolution.
+- Progressive + selective loading only (never full ultra-res image to client).
+- Browser memory hard limit ~50 MB total for image data.
+- Congestion-aware (don’t flood the network or client).
+- Server-side management of the image; client only receives what it currently needs.
+- Not a real-time continuous zoom like Amazon/TEMU product viewers.
+- Must support adding new ultra-large images later.
+- Original ideas preferred (pyramid/tile pyramid already ruled out; DB-of-converted-image already taken).
+
+Here are several original-leaning protocol families that stay efficient and respect the 50 MB ceiling. Each includes a sketch of the wire protocol, how resolution/region selection works, congestion + memory controls, and why it is different from classic pyramids or pure DB storage.
+
+### 1. Quadtree-Region + Adaptive Diff Protocol (QRAD)
+Server keeps the original image (or a lossless compressed form) and a lightweight spatial index (quadtree of regions).
+
+Client never holds more than a small set of “active patches”.
+
+**Protocol sketch (binary over persistent WebSocket or raw TCP after HTTP handshake):**
+- `HELLO` → server replies with image ID, max resolution, bit-depth, color space.
+- `VIEWPORT(x, y, w, h, target_res)` – client announces current visible region + desired resolution.
+- Server replies with a sequence of `PATCH(id, x, y, w, h, res, encoding, data)` + optional `DIFF(parent_id, delta)`.
+- `RELEASE(patch_id)` – client tells server it can discard a patch (or server can push `EVICT`).
+- Congestion: server sends `THROTTLE(rate)` or client sends `BUDGET(bytes)`.
+- Heartbeat + sequence numbers for loss recovery.
+
+**Memory control**: Client keeps a fixed-size LRU of patches (hard-capped at ~40 MB). When a new higher-res patch arrives, lower-res overlapping ones are dropped or kept only as fallback. Server can refuse high-res requests if client’s budget is already near limit.
+
+**Why original / efficient**: No pre-built multi-level pyramid on disk. Regions are computed on demand (or cached in a small server-side LRU). Diffs between consecutive resolutions reduce bandwidth when the user zooms slowly. Congestion is explicit in the protocol.
+
+### 2. Wavelet-Stream Progressive Protocol (WSP)
+Treat the image as a wavelet (or similar multi-resolution transform) and stream coefficient blocks on demand.
+
+Server stores (or computes) a wavelet decomposition once. Client reconstructs only the coefficients needed for the current viewport + resolution.
+
+**Protocol**:
+- `INIT` → server sends header (wavelet type, levels, dimensions).
+- `REQUEST_COEFFS(level, subband, region)` or a compact bit-mask of needed coefficient tiles.
+- Server streams `COEFF_BLOCK(level, coords, quantized_data)`.
+- Client can send `DROP_LEVEL(level)` to free memory; server acknowledges and stops sending that level.
+- Priority queue on server: visible region first, then surrounding “prefetch” at lower priority.
+- Congestion: server measures send-window and drops low-priority coefficient packets when the client’s receive buffer or reported memory pressure is high.
+
+**Memory**: Client holds only the coefficient set required for the current reconstruction (~ tens of MB max). Reconstruction can be done with a small in-browser WASM module or pure JS.
+
+**Advantage**: Extremely progressive (you can show a blurry full image almost immediately and refine). Bandwidth scales with detail requested, not with image size. Distinct from classic tile pyramids.
+
+### 3. Sparse Vector + Predictive Region Protocol (SVPR)
+Represent the image as a sparse set of “feature vectors” or compressed blocks that the server can assemble into any resolution/region.
+
+More radical idea: server maintains a spatial index of compressed blocks + a cheap predictive model (simple linear or even a tiny neural net running on the server) that guesses the next region the user will look at.
+
+**Protocol**:
+- Client sends continuous `CURSOR(x, y, zoom, velocity)` at low rate.
+- Server predicts next viewport and proactively pushes `BLOCK(id, region, res, data)`.
+- Client acknowledges with `ACK(id)` or `NACK(id, reason)`.
+- Explicit `DEMAND(region, res)` for when prediction is wrong.
+- Memory budget negotiation at session start and periodically: `BUDGET(50MB)`.
+- Server can force `REPLACE(old_id, new_id)` so the client never exceeds the budget.
+
+**Congestion handling**: Predictive traffic is low-priority; demand traffic is high-priority. Server uses a token-bucket per client.
+
+### 4. Hash-Addressed Fragment Protocol (HAFP)
+Break the image into fixed-size content-addressed fragments (like a content-defined chunking but spatial). Each fragment has a hash. Client only ever requests fragments by hash + resolution tag.
+
+**Protocol**:
+- Server first sends a compact “manifest” (Merkle-like tree or sparse index) of the current viewport at the requested resolution.
+- Client requests missing hashes: `GET_HASH(h1, h2, …)`.
+- Fragments can be shared across resolutions when possible (or differential).
+- Client maintains a hash → data cache with hard size limit; oldest/lowest-priority fragments are evicted and the server is told via `FORGET(hash)`.
+
+This is efficient for multi-client scenarios (server can deduplicate fragments in memory) and gives strong integrity checks.
+
+### 5. Hybrid “Resolution Ladder + On-Demand Crop” with Explicit Budget Protocol
+Simpler but still original in the control plane:
+- Server stores a few carefully chosen resolution “ladder” versions (not a full pyramid of tiles).
+- Client requests a crop of a specific ladder level: `CROP(level, x, y, w, h)`.
+- Protocol forces the client to declare its current memory occupancy and max allowed bytes before every high-res request.
+- Server may answer with a lower level or a downscaled crop if the client is near the 50 MB limit.
+- When the user zooms out or pans far, the client must explicitly `DISCARD(level_or_region)` so the server knows the client freed memory.
+
+### Cross-cutting recommendations for any protocol you choose
+
+1. **Persistent connection after HTTP bootstrap**
+   Initial page + JS + any libraries come over normal HTTP. Then upgrade to WebSocket (or raw TCP if you want full control) for the image protocol. This keeps the custom protocol clean.
+
+2. **Explicit memory & congestion messages** (mandatory for your 50 MB rule)
+   - Client → Server: `MEMORY_USED(bytes)`, `BUDGET(bytes)`
+   - Server → Client: `THROTTLE`, `EVICT(ids)`, `REFUSE(reason)`
+   Never let the client accumulate data blindly.
+
+3. **Priority + sequence numbers + selective ACKs**
+   Visible region = high priority. Prefetch = low. This prevents congestion collapse when many clients are active.
+
+4. **Server-side resource accounting**
+   Per-client state machine that tracks which patches/coeffs the client currently holds. This is how you guarantee the browser never sees the full image and stays under 50 MB.
+
+5. **Adding new images**
+   Admin endpoint (or simple HTTP POST with auth) that registers a new image ID. The server then builds whatever index/transform it needs offline or lazily. Clients discover available images via a normal HTTP catalog.
+
+Would you like me to expand any of these into a more concrete binary message format + state machine, or combine elements (e.g. wavelet + explicit budget + predictive prefetch)? Or do you have a preferred direction (more progressive, more region-based, more predictive, etc.) so we can refine one protocol further?
+
+
+
+---GEMINI---------------------------------------
+## Proposing Original Protocol Options for Ultra-High-Resolution Images
+
+Based on the project requirements—specifically handling massive multi-gigapixel images, keeping browser memory strictly under a ~50MB threshold, avoiding standard pyramid tiles, and utilizing a custom Java asynchronous server protocol over an initial HTTP handshake—here are **three original, highly efficient protocol options**.
+
+---
+
+### Option 1: Adaptive Vector-Mesh & Quad-Span Streaming Protocol (VMQSP)
+
+Instead of raster tiles or standard grids, this protocol treats the ultra-high-resolution image as a continuous geometric surface that dynamically subdivides based on the client's viewport frustum and zoom scale.
+
+* **How it Works:**
+1. **Server-Side Preprocessing:** The Java backend slices the master image into an internal multi-resolution hierarchical vector mesh or variable-sized adaptive bounding boxes (using quadtree-like spatial indexing in memory/disk, but *not* standard image pyramid tiles sent directly).
+2. **Client Viewport Handshake:** As the user pans/zooms, the client JavaScript sends a compact binary control frame over a custom TCP/WebSocket-based protocol specifying: `[Viewport_X, Viewport_Y, Width, Height, Zoom_Level_Factor]`.
+3. **Adaptive Streaming:** The Java server computes intersection and decides the optimal resolution tier. Instead of sending rigid tiles, it streams **compressed WebP/AVIF vector-clipped strip chunks** or dynamic bounding strips that fit the exact screen geometry.
+4. **Memory Management (Client):** The client keeps a strict LRU (Least Recently Used) cache in an HTML5 Canvas/OffscreenCanvas pool. When the memory footprint approaches the 50MB ceiling, older strips are explicitly garbage-collected (`nullified` and canvas contexts cleared).
+
+
+* **Why it's Original:** It avoids fixed-grid pyramid tiles entirely by utilizing dynamic geometric clipping controlled by a custom stateful tracking protocol on the Java backend.
+
+---
+
+### Option 2: Chunked Multi-Resolution Scanline Streaming Protocol (CMSSP)
+
+This protocol approaches the massive image like a high-performance video codec or streaming map layer, breaking the image down into continuous horizontal "stripes" or scanlines stored at multiple pre-rendered octave resolutions.
+
+* **How itWorks:**
+1. **Server-Side Preprocessing:** The Java server indexes the master image into horizontal scanline blocks across 4 distinct resolution tiers (e.g., Tier 0: 10%, Tier 1: 25%, Tier 2: 50%, Tier 3: 100%).
+2. **Protocol State Machine:** The custom protocol maintains a session state per client on the Java server. When a client moves their viewport, a lightweight binary packet is sent: `CMD_SHIFT [Delta_X, Delta_Y, Target_Tier]`.
+3. **Differential Transmission:** The server responds *only* with the missing scanline chunks required to fill the new viewport edges, while instructing the client via protocol headers to drop off-screen scanlines.
+4. **Memory Management (Client):** The browser maintains a sliding-window texture buffer. Because data is fed strictly as linear horizontal chunks, memory can be managed in a flat typed array (`ArrayBuffer`) or cyclic texture pool, ensuring it never crosses the 50MB limit.
+
+
+* **Why it's Original:** It bypasses traditional 2D grid/tile lookups by mapping the ultra-large image to a linear coordinate scanline state machine managed asynchronously by Java NIO channels.
+
+---
+
+### Option 3: Progressive Frequency Wavelet-Stream Protocol (FWSP)
+
+Inspired by wavelet compression (like JPEG 2000 or progressive transmission), this protocol streams compressed frequency bands of the requested region rather than raw pixel blocks.
+
+* **How it Works:**
+1. **Server-Side Preprocessing:** The Java backend processes regions of the image into discrete wavelet frequency sub-bands (coarse base layer + high-frequency detail layers).
+2. **Protocol Control:** The client requests a specific region using normalized canvas coordinates. The custom protocol allows a tiered delivery: **Layer 1 (Low Frequency / Blurry overview)** is sent first for instant feedback, followed by **Layer 2 (High-Frequency Details)** only if the user pauses panning on that region.
+3. **Dynamic Pruning:** If the user rapidly pans away, the client sends a `CANCEL_STREAM` or `FLUSH` control command to the Java server, instantly terminating unneeded packet generation on the asynchronous socket.
+
+
+* **Why it's Original:** It introduces frequency-based progressive refinement over a custom socket protocol, allowing users to "see through" low-res approximations instantly while saving bandwidth and enforcing strict memory caps on the client.
+
+---
+
+### Next Steps for Implementation
+
+1. Choose the protocol option that best fits your comfort level with spatial data processing in Java 21 (NIO/Sockets).
+2. Define the exact binary packet structure (e.g., Magic Byte + Command Type + Payload Length + Payload) for your custom protocol layer running alongside the initial HTTP setup.
+
+
+
+---CLAUDE1---------------------------------------
+Good constraints to design against. Let me split the problem, because "the protocol" is really two independent decisions and you can be original in either:
+
+1. **Representation** — how the image is decomposed so that resolution can be added *and removed* incrementally.
+2. **Wire protocol** — framing, per-client state, flow control, cancellation.
+
+Your professor's line about "transferencia y eliminación de información" is the strongest hint in the spec: he wants refinement deltas, not re-fetching. That rules in anything where level N+1 is expressed as a *difference* from level N.
+
+## Representation options
+
+**A. Subband delta stream (lifting wavelet).**
+At ingest, run an integer Haar or CDF 5/3 lifting transform, L levels. Level 0 is a tiny LL thumbnail; each upgrade ships only the three detail subbands (HL, LH, HH) for the requested region. Downgrade means the client literally deletes coefficient arrays and re-runs the inverse transform on what remains. Haar lifting is ~25 lines of JS in a worker, fully reversible in integers, no floating point drift. This matches the "add/remove information" requirement more exactly than anything else, and client memory is `visibleCoeffs × 2 bytes` in an `Int16Array`. The honest weakness: a grader may say "that's JPEG2000". Your answer is that JPIP is the *prior art you cite*, while the scheduler, ledger and flow control are yours.
+
+**B. Coset interlacing (generalized Adam7).**
+Partition the pixel grid into congruence classes mod 2^k. Pass 0 sends every 16th pixel (1/256 of the data), each later pass sends the cosets that double linear resolution. No transform at all, reconstruction is pixel placement. Dead simple, very fast in JS, and PNG's Adam7 (RFC 2083) is a citable precedent. Weakness: compression efficiency is mediocre unless you encode each coset plane separately server-side, and naive decimation aliases badly, so you want prefiltered planes.
+
+**C. Content-adaptive quadtree of residuals.**
+Instead of a uniform pyramid, split a node only when its local gradient energy exceeds a threshold. Flat sky terminates at depth 2 and never costs another byte; a crowd of faces goes to depth 9. Nodes addressed by Morton code, payload is a residual patch against the parent. This is your cleanest "we are explicitly not doing a pyramid" story, and you can put real numbers in the document (bytes/node histogram, % of image that never refines).
+
+**D. Rate-distortion ordered atom stream.**
+Offline, compute an ordering of all refinement atoms sorted by Δdistortion per byte. The stream becomes a monotone quality curve you can cut at any point; the client just takes the prefix of that ordering restricted to its viewport and budget. The payoff is a PSNR-vs-bytes graph in your document, which is exactly the kind of thing that earns the 35%. Costs you a heavier ingest pipeline.
+
+**E. Global VQ codebook + residual layers.**
+K-means a codebook of 4096 4×4 blocks, ship it once (~200 KB), then the image body is 12-bit indices. Refinements are 2 bit/pixel residual corrections. Decode is a table lookup, so it's very fast, and client memory is bounded and predictable. Genuinely feels like "our own codec". Slow ingest.
+
+**F. Foveated budget allocation.** Not a representation, a *policy* layer you bolt onto any of A–E: client reports viewport plus a focus point, server allocates a byte budget per region that decays with distance from focus. Cheap to implement, and it differentiates the protocol a lot.
+
+## The wire protocol
+
+Run it over a single WebSocket you implement yourself on top of your HTTP server (RFC 6455 upgrade: SHA-1 of key + GUID, base64). One connection beats the tile approach precisely on your congestion concern: 60 parallel tile GETs self-congest and give you head-of-line stalls you can't cancel.
+
+Binary frame: `VER(4) | TYPE(4) | FLAGS(8) | STREAM_ID(16) | EPOCH(16) | SEQ(16) | LENGTH(32) | payload`.
+
+Suggested opcodes: `HELLO/WELCOME` (capabilities, memory budget, catalog), `OPEN/MANIFEST` (dimensions, levels, atom geometry, base layer inline), `VIEW` (viewport rect, zoom, focus, epoch), `GRANT` (credit in bytes), `DELTA`, `DOWNGRADE`, `EVICT`, `CANCEL`, `DIGEST`, `PING`, `ERROR`.
+
+Four mechanisms carry most of the weight:
+
+**Per-client resolution ledger.** The server keeps a bitset of which atoms each client currently holds, so it only ever sends the difference. `EVICT` clears bits when the client drops something under memory pressure. A periodic `DIGEST` (CRC32 or a small Bloom filter over held atom IDs) detects divergence and triggers resync. This answers requirement #2 of the spec literally, and per-client cost is a few KB.
+
+**Credit-based flow control.** Denominate credits in *decoded* bytes, not wire bytes, and have the client issue `GRANT` only as its accounting says room exists. Your 50 MB cap then becomes a protocol invariant rather than a hope. Prior art to cite: HTTP/2 `WINDOW_UPDATE` (RFC 9113 §5.2). Do the arithmetic in the document: a 2560×1440 RGBA canvas alone is 14.7 MB, so a realistic split is ~15 MB canvas, ~25 MB atom cache, ~10 MB slack.
+
+**Epochs and cancellation.** Every `VIEW` bumps an epoch. The server drops queued work for stale epochs instead of transmitting it. Without this, a user panning three times leaves you pushing two viewports' worth of dead bytes, which is where the congestion actually comes from.
+
+**Client-side rate adaptation.** EWMA the goodput, and watch for queueing delay rising while delivery rate stays flat (bufferbloat signature). Back off refinement depth multiplicatively, increase additively. Same logic as ABR streaming, and you can cite BBR's delivery-rate estimation.
+
+On the Java side: `AsynchronousServerSocketChannel` for the proactor pattern, or Java 21 virtual threads (JEP 444) with a bounded platform-thread pool for the CPU-bound codec work so one client can't starve the rest. For the 700 GB file, map it with `MemorySegment` and a shared `Arena` rather than `MappedByteBuffer`, since you're not limited to 2 GB per mapping.
+
+## What I'd pick
+
+A + C + F: wavelet subband deltas, with content-adaptive depth so flat regions stop early, and foveated budget allocation. That gives you a real "delete information to downgrade" story, a defensible non-pyramid structure, and enough protocol surface to fill a serious document. If you want lower implementation risk, swap A for B and keep everything else.
+
+RFCs worth citing: 9110/9112 (HTTP), 6455 (WebSocket), 9113 §5.2 and §6.9 (flow control, priority), 9293 (TCP windows), 2083 (Adam7), 1951/7692 (DEFLATE, permessage-deflate), 2119 (normative language for your own spec), plus ISO/IEC 15444-9 for JPIP.
+
+Which way do you lean on the transform question: are you comfortable writing an inverse wavelet in a Web Worker, or would you rather keep the client dumb and push all the math server-side?
+
+
+
+---CHATGPT---------------------------------------
+Yes. And based on the project brief, I would **not** think of this as "how do we stream a giant image?" I would think of it as:
+
+> **How do we create a protocol that lets the browser hold a tiny, temporary representation of an enormous image, while the server remains the authority over the actual image data?**
+
+The brief explicitly gives us freedom to decide how to **store, process, divide, transform, select, and transfer** the image, and requires that the image transmission use our own control protocol.
+
+And your **~50 MB browser ceiling** makes the design much more interesting.
+
+I would explore these protocol families:
+
+---
+
+# 1. "Image as a Dataset" protocol
+
+This is probably the most interesting direction to me.
+
+Instead of treating the image as:
+
+```text
+IMAGE
+ └── pixels
+```
+
+we treat it as a dataset composed of **regions + representations**.
+
+The server preprocesses the giant image into something like:
+
+```text
+Image
+│
+├── Region A
+│   ├── coarse representation
+│   ├── medium representation
+│   └── detailed representation
+│
+├── Region B
+│   ├── coarse
+│   ├── medium
+│   └── detailed
+│
+└── ...
+```
+
+But unlike pyramidal tiles, these aren't necessarily conventional square tiles.
+
+The protocol could identify **semantic regions** or irregular chunks.
+
+For example:
+
+```text
+        ┌───────────────┐
+        │       A       │
+        │               │
+        ├───────┬───────┤
+        │   B   │   C   │
+        │       │       │
+        └───────┴───────┘
+```
+
+The browser doesn't request:
+
+> "Give me tile x=42,y=18."
+
+It requests:
+
+> "This viewport requires representation R of regions A, B and C."
+
+That distinction is important.
+
+---
+
+# 2. Progressive "image packets"
+
+This one could make for a **very original protocol**.
+
+Instead of sending independent image files, the server sends a stream of packets:
+
+```text
+HEADER
+  image_id
+  viewport_id
+  generation
+  resolution
+
+PACKET
+  region_id
+  x
+  y
+  width
+  height
+  quality
+  payload
+
+PACKET
+  region_id
+  x
+  y
+  width
+  height
+  quality
+  payload
+
+END
+```
+
+The clever part:
+
+### The browser doesn't necessarily keep everything.
+
+Suppose the browser has a 50 MB budget.
+
+Server:
+
+```text
+        SERVER
+          │
+          │ Region 31 @ quality 2
+          ▼
+      ┌─────────┐
+      │ Browser │
+      └─────────┘
+```
+
+User moves.
+
+The browser says:
+
+```text
+RELEASE
+region=31
+```
+
+Then:
+
+```text
+REQUEST
+region=47
+quality=3
+```
+
+So your protocol explicitly supports:
+
+```text
+LOAD
+UPGRADE
+DOWNGRADE
+RELEASE
+```
+
+That's much more interesting academically than simply implementing HTTP Range requests.
+
+---
+
+# 3. "Quality layers" without spatial tiles
+
+Here's a particularly crazy one.
+
+Imagine the original image is transformed into **multiple information layers**.
+
+Instead of:
+
+```text
+Level 0 → entire image
+Level 1 → tiles
+Level 2 → tiles
+Level 3 → tiles
+```
+
+you could have:
+
+```text
+BASE
+ └── broad color / low-frequency information
+
+DETAIL-1
+ └── medium-frequency information
+
+DETAIL-2
+ └── fine detail
+
+DETAIL-3
+ └── extremely fine detail
+```
+
+Think of the image as:
+
+```text
+IMAGE = BASE + DETAIL1 + DETAIL2 + DETAIL3
+```
+
+The browser initially receives only:
+
+```text
+BASE
+```
+
+Then, for the area currently being inspected:
+
+```text
+BASE
++
+DETAIL1
++
+DETAIL2
+```
+
+And potentially:
+
+```text
+BASE
++
+DETAIL1
++
+DETAIL2
++
+DETAIL3
+```
+
+elsewhere.
+
+This could use transforms such as wavelets or another multiresolution representation.
+
+The interesting protocol question becomes:
+
+> **Which information layers does the client currently possess?**
+
+Rather than:
+
+> Which tiles does the client possess?
+
+That's a very different architecture.
+
+---
+
+# 4. Predictive viewport protocol
+
+This is where congestion management becomes really interesting.
+
+Don't only respond to what the browser asks.
+
+The browser sends:
+
+```text
+VIEWPORT
+x
+y
+width
+height
+velocity
+direction
+resolution
+```
+
+For example:
+
+```text
+VIEWPORT
+
+x=8400
+y=3200
+
+velocity_x=+1.8
+velocity_y=0.2
+
+desired_quality=HIGH
+```
+
+The server can infer:
+
+```text
+          CURRENT
+             ↓
+      ┌─────────────┐
+      │             │
+      │     USER    │ → likely movement
+      │             │
+      └─────────────┘
+                    →
+             PRELOAD REGION
+```
+
+But **very carefully**.
+
+You don't want:
+
+```text
+user moves 1 pixel
+↓
+server sends 200 MB
+```
+
+Instead:
+
+```text
+HIGH PRIORITY
+current viewport
+
+MEDIUM PRIORITY
+small surrounding region
+
+LOW PRIORITY
+predicted direction
+```
+
+This gives you a natural protocol priority system.
+
+---
+
+# 5. Token-budget protocol
+
+I actually really like this for your 50 MB constraint.
+
+The browser tells the server:
+
+```text
+MEMORY-BUDGET: 50MB
+CURRENT-USAGE: 31MB
+```
+
+The server therefore knows:
+
+```text
+available = 19 MB
+```
+
+The protocol could maintain a **resource budget**.
+
+For example:
+
+```text
+CLIENT HELLO
+
+max_memory = 50MB
+preferred_memory = 35MB
+max_inflight = 4
+```
+
+Server responds:
+
+```text
+SESSION
+
+budget = 45MB
+reserved = 5MB
+```
+
+Now every object has a cost.
+
+```text
+REGION 14
+size = 2.4MB
+priority = HIGH
+```
+
+When memory gets close to the limit:
+
+```text
+EVICT
+region 9
+region 12
+```
+
+The server can then replace them with better regions.
+
+This gives you a very clean concept:
+
+> **The protocol isn't just transferring image data. It manages an image cache under a negotiated resource budget.**
+
+That's a strong project story.
+
+---
+
+# 6. "Viewport as a query"
+
+This is probably the most conceptually elegant.
+
+Instead of the browser saying:
+
+```text
+GET /tile/10/20
+```
+
+it sends something resembling a database query:
+
+```text
+QUERY IMAGE
+
+viewport:
+  x1
+  y1
+  x2
+  y2
+
+resolution:
+  2.4 px/source-pixel
+
+quality:
+  medium
+
+budget:
+  8 MB
+```
+
+The server calculates:
+
+```text
+        HUGE IMAGE
+ ┌─────────────────────────┐
+ │                         │
+ │       ┌──────────┐      │
+ │       │ VIEWPORT │      │
+ │       └──────────┘      │
+ │                         │
+ └─────────────────────────┘
+             ↓
+        query planner
+             ↓
+    ┌────────┬────────┐
+    │ region │ region │
+    └────────┴────────┘
+             ↓
+       response plan
+```
+
+Then returns:
+
+```text
+PLAN
+
+region 183 → quality 2
+region 184 → quality 2
+region 201 → quality 1
+region 202 → quality 1
+```
+
+Then the actual data follows.
+
+This makes your protocol feel like a **query language for images**.
+
+---
+
+# 7. Server-side "rendering cache"
+
+Another interesting approach:
+
+Don't store every possible representation.
+
+The server stores the enormous source image and maintains a cache:
+
+```text
+             ORIGINAL
+                 │
+        ┌────────┴────────┐
+        │                 │
+    requested          requested
+      region              region
+        │                 │
+        ▼                 ▼
+   decode/render      decode/render
+        │                 │
+        └────────┬────────┘
+                 ▼
+             CACHE
+```
+
+If Client A requests:
+
+```text
+x=10000
+y=5000
+quality=3
+```
+
+the server generates that representation.
+
+Client B later requests the same thing:
+
+```text
+CACHE HIT
+```
+
+This avoids enormous preprocessing storage.
+
+The protocol could even return:
+
+```text
+CACHE-HIT
+```
+
+versus:
+
+```text
+GENERATED
+```
+
+That would give you an interesting performance metric.
+
+---
+
+# 8. Region leasing
+
+This is a particularly unusual protocol idea.
+
+Instead of saying:
+
+> "The browser owns this data."
+
+the server **leases** image regions to the client.
+
+Example:
+
+```text
+LEASE
+
+region=R42
+quality=3
+expires=5000ms
+```
+
+The browser can use R42.
+
+When the user moves away:
+
+```text
+RELEASE R42
+```
+
+or the lease expires.
+
+The server therefore doesn't need to assume that the browser will retain anything forever.
+
+You could even have:
+
+```text
+LEASE
+EXTEND
+RELEASE
+EXPIRE
+```
+
+This naturally helps with memory control.
+
+---
+
+# 9. Differential viewport protocol
+
+Another idea I would seriously investigate.
+
+Instead of repeatedly sending complete regions, the server sends **changes relative to what the client already has**.
+
+Client:
+
+```text
+I HAVE:
+
+region 15
+version 3
+```
+
+Server:
+
+```text
+UPDATE
+
+region=15
+from_version=3
+to_version=4
+
+payload=...
+```
+
+Or the client changes resolution:
+
+```text
+CLIENT:
+
+region=15
+quality=2
+```
+
+Server:
+
+```text
+UPGRADE
+
+region=15
+from_quality=2
+to_quality=3
+
+payload=additional_information
+```
+
+This is potentially very efficient if the representation is designed correctly.
+
+The important idea is:
+
+> **Never transmit information the client already possesses.**
+
+That sounds obvious, but making it a fundamental protocol primitive is interesting.
+
+---
+
+# 10. Hybrid protocol: what I would actually build
+
+I wouldn't choose only one of these.
+
+I'd combine approximately **five ideas**:
+
+```text
+                  ┌──────────────────────┐
+                  │     GIANT IMAGE      │
+                  │       SERVER         │
+                  └──────────┬───────────┘
+                             │
+                    IMAGE REPRESENTATION
+                             │
+                 ┌───────────▼───────────┐
+                 │   REGION INDEX        │
+                 └───────────┬───────────┘
+                             │
+                       QUERY ENGINE
+                             │
+              ┌──────────────▼──────────────┐
+              │      CLIENT VIEWPORT        │
+              │                              │
+              │ x y width height             │
+              │ resolution                   │
+              │ velocity                     │
+              │ memory budget                │
+              └──────────────┬───────────────┘
+                             │
+                       RESPONSE PLAN
+                             │
+             ┌───────────────┼──────────────┐
+             ▼               ▼              ▼
+          HIGH             MEDIUM          LOW
+         priority         priority        priority
+             │               │              │
+             └───────────────┼──────────────┘
+                             ▼
+                       DATA PACKETS
+                             │
+                             ▼
+                     BROWSER CACHE
+                             │
+                       ┌─────┴─────┐
+                       │ 50 MB     │
+                       │ HARD CAP  │
+                       └───────────┘
+```
+
+And the protocol might have only a handful of commands:
+
+```text
+HELLO
+OPEN
+VIEW
+LOAD
+UPGRADE
+DOWNGRADE
+RELEASE
+EVICT
+CANCEL
+CLOSE
+```
+
+That is already a **real protocol**, rather than "we invented a URL format."
+
+---
+
+# The part I think could make this really original
+
+I'd investigate **content-aware variable regions**.
+
+Not:
+
+```text
+256 × 256
+256 × 256
+256 × 256
+256 × 256
+```
+
+everywhere.
+
+Instead, the server analyzes the giant image and creates regions according to **information density**.
+
+Imagine:
+
+```text
+┌──────────────────────────────────────┐
+│                                      │
+│     LOW DETAIL       ┌─────────┐     │
+│                      │ HIGH    │     │
+│                      │ DETAIL  │     │
+│                      └─────────┘     │
+│                                      │
+│  ┌─────────────────────┐             │
+│  │                     │             │
+│  │    HIGH DETAIL      │    LOW      │
+│  │                     │             │
+│  └─────────────────────┘             │
+│                                      │
+└──────────────────────────────────────┘
+```
+
+The server can make regions **larger where the image is simple** and **smaller where the image contains lots of information**.
+
+So instead of:
+
+```text
+1000 tiles
+```
+
+you might have:
+
+```text
+80 regions
+```
+
+with radically different sizes.
+
+That attacks bandwidth, memory, and request overhead simultaneously.
+
+And it gives you something substantial to explain in the protocol document:
+
+> **The spatial representation is adaptive rather than uniformly partitioned.**
+
+---
+
+## And congestion becomes part of the protocol, not an afterthought
+
+I'd explicitly define something like:
+
+```text
+PRIORITY
+
+P0 = currently visible
+P1 = immediately surrounding viewport
+P2 = predicted viewport
+P3 = speculative
+```
+
+Then:
+
+```text
+if congestion ↑
+    cancel P3
+    cancel P2
+    reduce P1 quality
+    preserve P0
+```
+
+So if the connection becomes terrible:
+
+```text
+          CONGESTION
+              ↑
+              │
+      ┌───────┴───────┐
+      │               │
+   discard          preserve
+ speculative       visible data
+      │               │
+      ▼               ▼
+    P3/P2             P0
+```
+
+That's a **really nice protocol property** because the system degrades gracefully.
+
+---
+
+# My ranking
+
+If we're looking for something that is both **original and realistically implementable in Java**, I'd rank the ideas:
+
+| Idea                    | Originality | Efficiency | Difficulty |           Worth exploring |
+| ----------------------- | ----------: | ---------: | ---------: | ------------------------: |
+| Adaptive regions        |       ⭐⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |       ⭐⭐⭐⭐ |                   **YES** |
+| Viewport-as-query       |       ⭐⭐⭐⭐⭐ |       ⭐⭐⭐⭐ |        ⭐⭐⭐ |                   **YES** |
+| Memory/token budget     |        ⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |         ⭐⭐ |                   **YES** |
+| Progressive packets     |        ⭐⭐⭐⭐ |       ⭐⭐⭐⭐ |        ⭐⭐⭐ |                   **YES** |
+| Region leasing          |       ⭐⭐⭐⭐⭐ |       ⭐⭐⭐⭐ |        ⭐⭐⭐ |                   **YES** |
+| Differential updates    |       ⭐⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |                     Maybe |
+| Frequency/detail layers |       ⭐⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |      ⭐⭐⭐⭐⭐ |            Research-heavy |
+| Predictive loading      |        ⭐⭐⭐⭐ |        ⭐⭐⭐ |        ⭐⭐⭐ |                  Optional |
+| Server render cache     |         ⭐⭐⭐ |       ⭐⭐⭐⭐ |        ⭐⭐⭐ | Good supporting mechanism |
+
+### My favorite overall concept:
+
+**Adaptive Region + Viewport Query + Memory Budget + Priority Packet Protocol**
+
+The mental model becomes:
+
+> **The browser doesn't download an image. It maintains a small, negotiated "window" into a much larger image, while the server dynamically decides which visual information is worth transmitting.**
+
+That fits the assignment extremely well: the server controls the ultra-high-resolution image, the client receives only what's needed, information can be transferred and removed as resolution changes, and the protocol explicitly manages resources and multiple clients.
+
+And importantly, **none of this requires pyramid tiles**.
+
+The next thing I'd do is design **2–3 radically different protocol architectures on paper**, including the actual packet/message formats and the lifecycle of a request, then attack each one for bandwidth, browser memory, server RAM, concurrency, and implementation complexity. That's where we'll find the genuinely good idea rather than accidentally reinventing tiles with a new hat.

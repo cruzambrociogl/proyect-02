@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project 2 — viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <aside id="hud">
+    <div class="hud-head">
+      <a href="/" class="back">&larr; catalog</a>
+      <span id="status" class="pill">connecting…</span>
+    </div>
+
+    <h3>image</h3>
+    <div class="row"><span>name</span><b id="imgName">–</b></div>
+    <div class="row"><span>dimensions</span><b id="imgDims">–</b></div>
+    <div class="row"><span>megapixels</span><b id="imgMP">–</b></div>
+    <div class="row"><span>file size</span><b id="imgBytes">–</b></div>
+    <div class="row"><span>tile / ratio</span><b id="imgTile">–</b></div>
+    <div class="row"><span>ladder levels</span><b id="imgLevels">–</b></div>
+
+    <h3>showing</h3>
+    <div class="row"><span>zoom</span><b id="zoom">–</b></div>
+    <div class="row"><span>level</span><b id="level">–</b></div>
+    <div class="row"><span>source px / tile px</span><b id="ladderScale">–</b></div>
+    <div class="row"><span>region x,y</span><b id="regionXY">–</b></div>
+    <div class="row"><span>region w&times;h</span><b id="regionWH">–</b></div>
+    <div class="row"><span>of whole image</span><b id="regionPct">–</b></div>
+    <div class="row"><span>tile range</span><b id="tileRange">–</b></div>
+
+    <h3>requesting</h3>
+    <div class="row"><span>epoch</span><b id="epoch">0</b></div>
+    <div class="row"><span>GAZE sent</span><b id="gazeCount">0</b></div>
+    <div class="row"><span>tiles in view</span><b id="needed">0</b></div>
+    <div class="row"><span>already held</span><b id="reused">0</b></div>
+    <div class="row"><span>asked for</span><b id="asked">0</b></div>
+
+    <h3>receiving</h3>
+    <div class="row"><span>tiles received</span><b id="rxTiles">0</b></div>
+    <div class="row"><span>total</span><b id="rxBytes">0 KB</b></div>
+    <div class="row"><span>avg / tile</span><b id="rxAvg">–</b></div>
+    <div class="row"><span>rate</span><b id="rxRate">0 KB/s</b></div>
+
+    <h3>client memory</h3>
+    <div class="row"><span>tiles held</span><b id="memTiles">0</b></div>
+    <div class="row"><span>estimated</span><b id="memMB">0 MB</b></div>
+    <div class="row"><span>evicted</span><b id="memEvicted">0</b></div>
+
+    <div class="hint">drag to pan &middot; wheel to zoom</div>
+  </aside>
+
+<script src="app.js"></script>
+</body>
+</html>
