@@ -1,0 +1,18 @@
+# Build output
+app/server/build/
+ideas/server/build/
+__pycache__/
+*.pyc
+
+# Image data: sources and their preparations are large and can be rebuilt with Prepare
+app/images/
+ideas/images/
+
+# Generated figures and videos
+app/out/
+ideas/out/
+
+# The assignment brief is the instructor's document
+Proyecto_Servidor_Asi_ncrono.pdf
+
+.DS_Store
