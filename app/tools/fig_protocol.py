@@ -19,17 +19,33 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fig_pipeline import BAND, BORROWED, DIM, INK, OURS, PAPER, RULE, Sheet  # noqa: E402
 
-W, H = 2400, 2950
+W, H = 2400, 3260
 LOST = (196, 62, 58)
 KEPT = (28, 130, 76)
 REPAIR = (58, 104, 190)
 WASH = (238, 242, 248)
 
 
-def band(sheet, y0, y1, number, title, subtitle):
-    sheet.rect((40, y0, W - 40, y1), outline=None, fill=BAND, radius=12)
+def band(sheet, y0, y1, number, title, subtitle, accent=False):
+    """A section. The one that matters most is tinted and outlined, so the eye finds it."""
+    sheet.rect((40, y0, W - 40, y1), outline=REPAIR if accent else None,
+               fill=(240, 245, 252) if accent else BAND, radius=12, width=2 if accent else 1)
     sheet.text((62, y0 + 16), f"{number} · {title}", size=22, bold=True)
     sheet.text((62, y0 + 46), subtitle, size=15, fill=DIM)
+
+
+def badge(sheet, x, y, text, colour=REPAIR):
+    width = 13 * len(text) + 28
+    sheet.rect((x, y, x + width, y + 34), outline=colour, fill=PAPER, radius=17, width=2)
+    sheet.text((x + width / 2, y + 8), text, size=15, bold=True, fill=colour, anchor="ma")
+    return x + width
+
+
+def step(sheet, x, y, number, title):
+    """A numbered beat of the walkthrough, so it can be told in order."""
+    sheet.rect((x, y, x + 34, y + 34), outline=REPAIR, fill=REPAIR, radius=17)
+    sheet.text((x + 17, y + 7), str(number), size=17, bold=True, fill=PAPER, anchor="ma")
+    sheet.text((x + 48, y + 7), title, size=18, bold=True)
 
 
 def note(sheet, box, lines, colour=DIM):
@@ -201,46 +217,55 @@ def main():
           "No packet type for an acknowledgement exists. There is nowhere to put one."])
 
     # ---------------------------------------------------------------- 3. FEC
-    band(sheet, 1590, 2480, "3", "How a unit survives loss",
-         "Worked through on a real tile: the eye of the Holbein portrait, 17,736 bytes, "
-         "at the finest level.")
+    band(sheet, 1590, 2760, "3", "The erasure code: how a unit survives loss",
+         "The part that replaces retransmission. Worked through on a real tile - the eye of the "
+         "Holbein portrait, 17,736 bytes, at the finest level.", accent=True)
+    at = badge(sheet, 1090, 1602, "this is the FEC")
+    badge(sheet, at + 14, 1602, "366 lines of Java, and 123 of test", colour=DIM)
 
-    sheet.text((66, 1690), "Cut into symbols", size=18, bold=True)
-    sheet.text((66, 1718), "17,736 bytes ÷ 1,200 = 15 symbols. The last one is short and padded.",
+    # ---- 1 cut
+    step(sheet, 66, 1690, 1, "Cut the unit into symbols")
+    sheet.text((66, 1738), "17,736 bytes ÷ 1,200 = 15 symbols. The last one is short and padded.",
                size=15)
-    sheet.text((66, 1742), "Symbols 0 to 14 are the unit's own bytes: nothing is computed, and a",
+    sheet.text((66, 1762), "Symbols 0 to 14 are the unit's own bytes. That matters: a path that",
                size=15)
-    sheet.text((66, 1764), "path that loses nothing does no arithmetic at all.", size=15)
+    sheet.text((66, 1784), "loses nothing does no arithmetic at all, at either end.", size=15)
 
     for i in range(15):
         x = 66 + i * 52
-        sheet.rect((x, 1800, x + 46, 1846), outline=RULE, fill=PAPER, radius=4)
-        sheet.text((x + 23, 1812), f"s{i}", size=14, bold=True, anchor="ma")
-    sheet.text((66, 1856), "the bytes themselves", size=13, fill=DIM)
+        sheet.rect((x, 1820, x + 46, 1866), outline=RULE, fill=PAPER, radius=4)
+        sheet.text((x + 23, 1832), f"s{i}", size=14, bold=True, anchor="ma")
+    sheet.text((66, 1876), "the bytes themselves - \"systematic\"", size=13, fill=DIM)
 
     for i in range(3):
         x = 66 + (15 + i) * 52 + 16
-        sheet.rect((x, 1800, x + 46, 1846), outline=REPAIR, fill=(240, 245, 253), radius=4)
-        sheet.text((x + 23, 1812), f"r{i}", size=14, bold=True, anchor="ma", fill=REPAIR)
-    sheet.text((66 + 15 * 52 + 16, 1856), "mixtures, endless", size=13, fill=REPAIR)
+        sheet.rect((x, 1820, x + 46, 1866), outline=REPAIR, fill=(228, 238, 252), radius=4)
+        sheet.text((x + 23, 1832), f"r{i}", size=14, bold=True, anchor="ma", fill=REPAIR)
+    sheet.text((66 + 15 * 52 + 16, 1876), "mixtures, endless", size=13, fill=REPAIR)
 
-    sheet.text((66, 1910), "Each mixture is one equation", size=18, bold=True)
-    sheet.text((66, 1940), "r0  =  c0·s0  +  c1·s1  +  …  +  c14·s14", size=17, bold=True, fill=REPAIR)
-    sheet.text((66, 1972), "with the real coefficients of symbol 15:   98  126  236  8  255  184  174  107 …",
+    # ---- 2 mix
+    step(sheet, 66, 1930, 2, "Every mixture is one equation")
+    sheet.text((66, 1984), "r0  =  c0·s0  +  c1·s1  +  …  +  c14·s14",
+               size=19, bold=True, fill=REPAIR)
+    sheet.text((66, 2020), "the real coefficients of symbol 15:   98  126  236  8  255  184  174  107 …",
                size=15)
-    sheet.text((66, 1998), "and for the first byte of each:   98·255 + 126·104 + 236·229 + … = 61",
+    sheet.text((66, 2046), "and for the first byte of each:   98·255 + 126·104 + 236·229 + … = 61",
                size=15)
-    sheet.text((66, 2030), "Addition is exclusive-or; multiplication is the Reed-Solomon one, "
-               "a 64 KB table, polynomial 0x11D.", size=15, fill=DIM)
-    sheet.text((66, 2056), "The coefficients are generated from the symbol's own number, so both "
-               "ends make the same ones and", size=15, fill=DIM)
-    sheet.text((66, 2078), "no packet ever carries a coefficient. They are never zero: a zero "
-               "would drop a symbol from the mixture.", size=15, fill=DIM)
+    sheet.text((66, 2080), "Addition is exclusive-or. Multiplication is the Reed-Solomon one: "
+               "a field of 256 elements,", size=15, fill=DIM)
+    sheet.text((66, 2102), "polynomial 0x11D, a 64 KB table, one array lookup per byte.",
+               size=15, fill=DIM)
+    sheet.text((66, 2134), "The coefficients come from the symbol's own number through a fixed "
+               "mixer, so both ends", size=15, fill=DIM)
+    sheet.text((66, 2156), "generate the same ones and no packet ever carries a coefficient. "
+               "None is ever zero: a zero", size=15, fill=DIM)
+    sheet.text((66, 2178), "would quietly drop a symbol out of the mixture.", size=15, fill=DIM)
 
-    sheet.text((1300, 1690), "Three go missing", size=18, bold=True)
+    # ---- 3 lose
+    step(sheet, 1300, 1690, 3, "Three go missing on the way")
     for i in range(15):
         x = 1300 + (i % 8) * 64
-        y = 1730 + (i // 8) * 58
+        y = 1748 + (i // 8) * 58
         lost = i in (3, 11, 12)
         sheet.rect((x, y, x + 54, y + 44), outline=LOST if lost else RULE,
                    fill=(253, 240, 240) if lost else PAPER, radius=4)
@@ -250,60 +275,80 @@ def main():
             sheet.line((x + 8, y + 8), (x + 46, y + 36), fill=LOST, width=2)
             sheet.line((x + 46, y + 8), (x + 8, y + 36), fill=LOST, width=2)
 
-    sheet.text((1300, 1856), "The receiver says:  \"unit 42, block 0 — three more\"",
-               size=16, bold=True, fill=OURS)
-    sheet.text((1300, 1882), "Not which ones. It does not know, and it does not matter.",
-               size=15, fill=DIM)
+    # ---- 4 ask
+    step(sheet, 1300, 1880, 4, "The receiver asks for a number")
+    sheet.rect((1300, 1930, 2080, 1986), outline=OURS, fill=(238, 248, 242), radius=8)
+    sheet.text((1320, 1946), "\"unit 42, block 0 — three more\"", size=18, bold=True, fill=OURS)
+    sheet.text((1300, 2000), "Not which ones. It does not know which they were, and it does not "
+               "need to:", size=15)
+    sheet.text((1300, 2022), "it only counts how many equations it is short of.", size=15)
 
+    # ---- 5 rebuild
+    step(sheet, 1300, 2060, 5, "Any three mixtures rebuild it")
     for i in range(3):
         x = 1300 + i * 64
-        sheet.rect((x, 1918, x + 54, 1962), outline=REPAIR, fill=(240, 245, 253), radius=4)
-        sheet.text((x + 27, 1930), f"r{i}", size=14, bold=True, anchor="ma", fill=REPAIR)
-    sheet.arrow((1490, 1940), (1540, 1940), fill=DIM)
-    sheet.rect((1560, 1918, 1900, 1962), outline=KEPT, fill=(238, 248, 242), radius=4)
-    sheet.text((1730, 1930), "the unit, byte for byte", size=15, bold=True, anchor="ma", fill=KEPT)
+        sheet.rect((x, 2110, x + 54, 2154), outline=REPAIR, fill=(228, 238, 252), radius=4)
+        sheet.text((x + 27, 2122), f"r{i}", size=14, bold=True, anchor="ma", fill=REPAIR)
+    sheet.arrow((1490, 2132), (1540, 2132), fill=DIM)
+    sheet.rect((1560, 2110, 1960, 2154), outline=KEPT, fill=(238, 248, 242), radius=4)
+    sheet.text((1760, 2122), "the unit, byte for byte", size=15, bold=True, anchor="ma", fill=KEPT)
 
-    note(sheet, (1300, 1990, 2340, 2170),
-         ["Any three mixtures would have done. Each arriving symbol is one equation in the",
-          "fifteen unknown source symbols; it is eliminated against the ones already held as it",
-          "arrives, so the work is spread over the transfer instead of landing at the end, and a",
-          "symbol that teaches nothing new is recognised and dropped on the spot.",
+    note(sheet, (1300, 2180, 2340, 2330),
+         ["Fifteen unknowns, and every symbol that arrives is one equation in them. Each is",
+          "eliminated against the ones already held as it arrives, so the work is spread over the",
+          "transfer instead of landing in a lump at the end, and a symbol that teaches nothing new",
+          "is recognised and thrown away on the spot.",
           "",
-          "Fifteen independent equations, fifteen unknowns: the unit falls out. 0.4 ms of",
-          "arithmetic for a 60 KB unit at 10% loss."])
+          "Fifteen independent equations and the unit falls out. 0.4 ms for a 60 KB unit."])
 
-    sheet.text((66, 2200), "What the repair costs, measured", size=18, bold=True)
+    # ---- the cost, and where it lives
+    sheet.text((66, 2230), "What the repair costs, measured", size=18, bold=True)
     columns = [("path loses", "0%", "5%", "10%", "20%", "40%"),
                ("symbols sent beyond the minimum", "0%", "6%", "12%", "28%", "86%")]
     for row, (head, *values) in enumerate(columns):
-        y = 2240 + row * 34
+        y = 2270 + row * 32
         sheet.text((66, y), head, size=15, bold=(row == 0), fill=DIM if row == 0 else INK)
         for col, value in enumerate(values):
-            sheet.text((640 + col * 130, y), value, size=15,
+            sheet.text((620 + col * 116, y), value, size=15,
                        bold=(row == 1), fill=INK if row else DIM)
-    sheet.text((66, 2320),
-               "No symbol was ever wasted at any loss rate: every one that arrived added "
-               "something the receiver did not have.", size=15, fill=DIM)
-    sheet.text((66, 2348),
-               "The sender chooses how many to send from the loss the receiver reports, so the "
-               "redundancy is paid only where the path loses packets.", size=15, fill=DIM)
+    sheet.text((66, 2340), "No symbol was ever wasted at any of those rates: every one that "
+               "arrived added something", size=15, fill=DIM)
+    sheet.text((66, 2362), "the receiver did not already have. The sender picks how many to send "
+               "from the loss the", size=15, fill=DIM)
+    sheet.text((66, 2384), "receiver reports, so redundancy is paid only where the path loses "
+               "packets.", size=15, fill=DIM)
 
-    note(sheet, (66, 2390, 1180, 2460),
-         ["Why not ask for the packet that was lost? Because by the time the request arrives the",
-          "view may be gone, and because any mixture answers any gap - one spare symbol covers",
-          "whichever of the fifteen went missing, so the sender never has to keep them to hand."])
+    note(sheet, (66, 2430, 1180, 2600),
+         ["Where it lives:",
+          "p2/fec/Galois.java          70 lines   the field: one table, two operations",
+          "p2/fec/Block.java           76 lines   how a message is cut, and the coefficients",
+          "p2/fec/BlockDecoder.java   100 lines   elimination as symbols arrive",
+          "p2/fec/MessageCodec.java   120 lines   the encoder and the receiving half",
+          "p2/fec/FecSelfTest.java    123 lines   encode, drop at random, check byte for byte"])
 
-    note(sheet, (1220, 2390, 2340, 2460),
-         ["Blocks of at most 64 symbols, so solving one stays a few milliseconds: the cost of a",
-          "rebuild grows with the square of the block, and a unit of 76 KB is the largest that",
-          "one block covers. Bigger units are simply cut into more blocks."])
+    note(sheet, (1220, 2430, 2340, 2600),
+         ["Why not just ask for the packet that was lost?",
+          "Because by the time the request arrives the view may be gone - and because any",
+          "mixture answers any gap. One spare symbol covers whichever of the fifteen went",
+          "missing, so the sender never has to keep particular packets to hand, and the",
+          "receiver never has to name them. That is the whole reason there is no NAK, no",
+          "selective repeat and no acknowledgement anywhere in this protocol."])
+
+    note(sheet, (66, 2630, 2340, 2740),
+         ["How to tell it in five sentences:",
+          "1 · A unit is cut into 1,200-byte symbols, and the first ones are simply its own bytes.   "
+          "2 · Beyond those, the sender can make endless mixtures of them, each one an equation.",
+          "3 · Whatever is lost, the receiver counts how many equations it is short of and asks for "
+          "that many - never for particular packets.   4 · Any mixtures will do, because any k",
+          "independent equations solve k unknowns.   5 · So loss is repaired without anything "
+          "being sent twice, and without either end tracking what went missing."])
 
     # ---------------------------------------------------------------- 4. staying in step
-    band(sheet, 2510, 2940, "4", "Staying in step, with nothing acknowledged",
+    band(sheet, 2790, 3220, "4", "Staying in step, with nothing acknowledged",
          "Three rules do the work that acknowledgements usually do. Each was wrong once, and "
          "the mistake is written beside it.")
 
-    note(sheet, (66, 2600, 810, 2880),
+    note(sheet, (66, 2880, 810, 3160),
          ["A gap is not a loss:",
           "While symbols are still arriving, what is",
           "missing is on its way. The receiver asks",
@@ -315,7 +360,7 @@ def main():
           "appeared doubled the traffic - 102%",
           "overhead on a path losing nothing."])
 
-    note(sheet, (850, 2600, 1594, 2880),
+    note(sheet, (850, 2880, 1594, 3160),
          ["Silence means delivered:",
           "A unit is finished when the receiver stops",
           "naming it. So the receiver names every unit",
@@ -328,7 +373,7 @@ def main():
           "freed it, and the request that followed",
           "found nothing left to answer it."])
 
-    note(sheet, (1634, 2600, 2340, 2880),
+    note(sheet, (1634, 2880, 2340, 3160),
          ["The epoch is shared:",
           "The client raises it on every view. Both",
           "ends drop everything older, and the report",
