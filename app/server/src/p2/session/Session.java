@@ -48,6 +48,8 @@ public final class Session implements Link.Inbound {
 
     private long unitsSent, bytesSent, unitsCancelled, viewsSeen;
     private long lastStats;
+    private boolean wasIdle = true;
+    private boolean regather;            // the transport gave work back: work out what is missing
 
     public Session(Catalog catalog, Link link) {
         this.catalog = catalog;
@@ -92,6 +94,10 @@ public final class Session implements Link.Inbound {
     }
 
     private void open(String name) throws IOException {
+        if (name.equals(imageName) && served != null) {
+            chart();                    // already open: they only missed the answer
+            return;
+        }
         if (!catalog.has(name)) {
             fault("no such image: " + name);
             return;
@@ -108,9 +114,14 @@ public final class Session implements Link.Inbound {
         epoch = 0;
         unitsSent = bytesSent = unitsCancelled = viewsSeen = 0;
 
+        chart();
+    }
+
+    /** What this image looks like: its shape, its method, how it is cut up. */
+    private void chart() {
         ImageMethod.Meta meta = served.meta();
         Map<String, Object> chart = new LinkedHashMap<>();
-        chart.put("image", name);
+        chart.put("image", imageName);
         chart.put("method", catalog.method().id());
         chart.put("contentType", served.unitContentType());
         chart.put("width", meta.width());
@@ -171,19 +182,70 @@ public final class Session implements Link.Inbound {
         stats();
     }
 
+    /**
+     * The transport gave up on a unit. Strike it from the ledger, and if the view still wants
+     * it, queue it again.
+     *
+     * Without this the ledger lies. A unit is written into it the moment it is handed over,
+     * because the transport is the thing that knows how to deliver it; when the transport then
+     * abandons it - the viewer moved, the deadline passed - the session would go on believing
+     * the viewer had a tile it was never sent, and would never offer it again. The hole stays
+     * on the screen for as long as the viewer keeps looking at it, which is exactly the case
+     * where it is most obvious.
+     */
+    @Override
+    public void abandoned(ByteBuffer message) {
+        if (!Wire.looksValid(message) || Wire.type(message) != Wire.UNIT) return;
+        int at = message.position() + Wire.HEADER;
+        UnitId id = new UnitId(message.getShort(at) & 0xffff,
+                message.getInt(at + 2), message.getInt(at + 6));
+        if (!held.remove(id)) return;
+        unitsSent--;
+        bytesSent -= message.remaining() - Wire.HEADER - Wire.UNIT_HEADER;
+        // Not queued here and now: this is called from inside the sending loop, which is
+        // walking the very queue that would be replaced. The next turn of the loop picks it up.
+        regather = true;
+    }
+
+    /** Work out again what the current view is missing, after units were given back. */
+    private void regather() {
+        regather = false;
+        if (served == null || viewport == null) return;
+        List<UnitId> next = new ArrayList<>();
+        for (UnitId id : served.unitsFor(viewport)) {
+            if (!held.contains(id)) next.add(id);
+        }
+        queue = next;
+        queueAt = 0;
+    }
+
     /** Called by the transport when it drains, so a big view keeps flowing. */
     @Override
     public void drained() {
         try {
+            if (regather) regather();
             pump();
         } catch (IOException e) {
             fault(String.valueOf(e));
         }
     }
 
+    /**
+     * Statistics for the panel, a few times a second at most, plus one the moment the queue
+     * empties so the last numbers are the true ones.
+     *
+     * The throttle has to hold even when there is nothing left to send. Over our own protocol
+     * this is called every time the client reports, a hundred times a second, and each of
+     * these is a message the sender then has to deliver: for one image of twelve tiles the
+     * wire was carrying seven hundred units, almost all of them statistics about carrying
+     * statistics.
+     */
     private void stats() {
         long now = System.currentTimeMillis();
-        if (now - lastStats < 200 && queueAt < queue.size()) return;
+        boolean idle = queueAt >= queue.size();
+        boolean justFinished = idle && !wasIdle;
+        wasIdle = idle;
+        if (now - lastStats < 200 && !justFinished) return;
         lastStats = now;
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("epoch", epoch);
@@ -196,6 +258,7 @@ public final class Session implements Link.Inbound {
         s.put("views", viewsSeen);
         s.put("linkBytes", link.bytesSent());
         s.put("linkMessages", link.messagesSent());
+        s.putAll(link.extra());
         send(Wire.text(Wire.STATS, epoch, Json.write(s)));
     }
 

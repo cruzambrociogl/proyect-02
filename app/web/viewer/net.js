@@ -5,7 +5,7 @@
 
 export const MAGIC_0 = 80, MAGIC_1 = 50, VERSION = 1, HEADER = 12;
 export const HELLO = 1, WELCOME = 2, OPEN = 3, CHART = 4, VIEW = 5, UNIT = 6, FAULT = 7,
-  BYE = 8, STATS = 9;
+  BYE = 8, STATS = 9, PATH = 16;
 
 function header(type, epoch, payloadLength) {
   const buffer = new ArrayBuffer(HEADER + payloadLength);
@@ -22,7 +22,8 @@ function header(type, epoch, payloadLength) {
 export class Connection {
   /**
    * @param {string} url        where the bridge lives
-   * @param {object} handlers   onWelcome, onChart, onUnit, onStats, onFault, onOpen, onClose
+   * @param {object} handlers   onWelcome, onChart, onUnit, onStats, onPath, onFault,
+   *                             onOpen, onClose
    */
   constructor(url, handlers) {
     this.handlers = handlers;
@@ -103,6 +104,7 @@ export class Connection {
       case WELCOME: this.handlers.onWelcome?.(JSON.parse(text())); break;
       case CHART: this.handlers.onChart?.(JSON.parse(text())); break;
       case STATS: this.handlers.onStats?.(JSON.parse(text())); break;
+      case PATH: this.handlers.onPath?.(JSON.parse(text())); break;
       case FAULT: this.handlers.onFault?.(text()); break;
       case UNIT: {
         const level = view.getUint16(HEADER);

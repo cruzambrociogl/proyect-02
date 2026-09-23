@@ -26,6 +26,7 @@ let lastViewSent = 0;
 let viewPending = false;
 let viewsSent = 0;
 let serverStats = {};
+let pathStats = {};
 let frames = 0, fps = 0, fpsSince = performance.now();
 const rateWindow = [];
 
@@ -100,6 +101,7 @@ function connect() {
       }
     },
     onStats: (s) => { serverStats = s; },
+    onPath: (p) => { pathStats = p; },
   });
 }
 
@@ -262,6 +264,24 @@ function updatePanel() {
   panel.set('server queue', String(serverStats.queued ?? 0));
   panel.set('cancelled', String(serverStats.unitsCancelled ?? 0));
   panel.set('epoch', String(epoch));
+
+  // The protocol's own numbers: the sending side reports what it has measured about the
+  // path, the client half reports what it has seen arrive.
+  const mbit = (bits) => (bits == null ? '–' : `${(bits / 1e6).toFixed(1)} mbit/s`);
+  const ms = (micros) => (micros == null ? '–' : `${(micros / 1000).toFixed(1)} ms`);
+  panel.set('send rate', mbit(serverStats.rate));
+  panel.set('round trip', ms(serverStats.rttMicros));
+  panel.set('queue', ms(serverStats.queueMicros));
+  panel.set('path floor', ms(serverStats.floorMicros));
+  panel.set('loss', serverStats.loss == null ? '–' : `${(serverStats.loss * 100).toFixed(1)}%`);
+  panel.set('symbols out', (serverStats.symbols ?? 0).toLocaleString());
+  panel.set('units delivered', String(serverStats.unitsDelivered ?? 0));
+  panel.set('units dropped', String(serverStats.unitsDropped ?? 0));
+  panel.set('packets in', (pathStats.packetsIn ?? 0).toLocaleString());
+  panel.set('symbols wasted', String(pathStats.symbolsWasted ?? 0));
+  panel.set('units rebuilt', String(pathStats.unitsRebuilt ?? 0));
+  panel.set('units part built', String(pathStats.unitsPartial ?? 0));
+  panel.set('stale', String(pathStats.unitsStale ?? 0));
 
   panel.set('units held', String(scene.units.size));
   panel.set('held bytes', human(scene.heldBytes));

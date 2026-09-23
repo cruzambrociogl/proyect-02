@@ -6,8 +6,10 @@ import p2.media.Catalog;
 import p2.media.ImageMethod;
 import p2.media.LadderTiles;
 import p2.media.SplatMethod;
+import p2.bridge.Bridge;
 import p2.net.WebSocketLink;
-import p2.session.Session;
+import p2.net.udp.Impairment;
+import p2.net.udp.ProtocolServer;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +30,7 @@ public final class Main {
         Path web = Path.of("web");
         String methodId = LadderTiles.ID;
         String python = System.getenv().getOrDefault("P2_PYTHON", "python3");
+        String impairment = "none";
         Path fitter = Path.of("tools", "fit_splats.py");
 
         for (int i = 0; i < args.length; i++) {
@@ -39,9 +42,12 @@ public final class Main {
                 case "--method" -> methodId = args[++i];
                 case "--python" -> python = args[++i];
                 case "--fitter" -> fitter = Path.of(args[++i]);
+                case "--impair" -> impairment = args[++i];
                 case "--help" -> {
                     System.out.println("usage: run.sh [--port n] [--udp-port n] [--images dir] "
-                            + "[--web dir] [--method ladder-tiles|splats-4000] [--python path]");
+                            + "[--web dir] [--method ladder-tiles|splats-4000] [--python path]\n"
+                            + "                [--impair loss=5%,delay=40ms,jitter=10ms,"
+                            + "rate=20mbit,reorder=1%,duplicate=0.5%]");
                     return;
                 }
                 default -> {
@@ -62,11 +68,23 @@ public final class Main {
         Catalog catalog = new Catalog(imagesDir, method);
         Routes routes = new Routes(catalog, webDir, udpPort);
 
-        // The browser reaches the session layer through the WebSocket bridge at /link.
-        HttpServer.Upgrade bridge = (request, channel, leftover) ->
-                request.path().equals("/link")
-                        && WebSocketLink.accept(request, channel, leftover,
-                                link -> new Session(catalog, link)) != null;
+        // The image itself travels over our own protocol, on UDP. The browser cannot speak
+        // that, so what it connects to at /link is the client half of the protocol, which
+        // holds a UDP socket of its own and carries the messages between the two.
+        Impairment path = Impairment.parse(impairment);
+        ProtocolServer protocol = new ProtocolServer(udpPort, catalog, path);
+        int protocolPort = protocol.port();
+
+        HttpServer.Upgrade bridge = (request, channel, leftover) -> {
+            if (!request.path().equals("/link")) return false;
+            return WebSocketLink.accept(request, channel, leftover, link -> {
+                try {
+                    return new Bridge(link, protocolPort, Impairment.NONE);
+                } catch (java.io.IOException problem) {
+                    throw new RuntimeException(problem);
+                }
+            }) != null;
+        };
 
         new HttpServer(port, routes, routes, bridge).start();
 
@@ -74,6 +92,7 @@ public final class Main {
         System.out.printf("method  %s%n", method.id());
         System.out.printf("server  http://localhost:%d/          (manage what is served)%n", port);
         System.out.printf("viewer  http://localhost:%d/viewer    (look at an image)%n", port);
+        System.out.printf("protocol  udp %d, %s%n", protocolPort, path);
         Thread.currentThread().join();
     }
 

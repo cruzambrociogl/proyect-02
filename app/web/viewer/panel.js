@@ -7,6 +7,9 @@ const SECTIONS = [
   ['View', ['zoom', 'level', 'scale', 'centre', 'region', 'visible', 'units wanted', 'held', 'missing']],
   ['Transfer', ['link', 'views sent', 'units in', 'bytes in', 'rate', 'average unit',
     'server queue', 'cancelled', 'epoch']],
+  ['Protocol', ['send rate', 'round trip', 'queue', 'path floor', 'loss', 'symbols out',
+    'units delivered', 'units dropped', 'packets in', 'symbols wasted', 'units rebuilt',
+    'units part built', 'stale']],
   ['Client memory', ['units held', 'held bytes', 'budget', 'evicted', 'unreported drops']],
   ['Rendering', ['units drawn', 'splats drawn', 'draw time', 'frames']],
 ];

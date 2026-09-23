@@ -30,6 +30,16 @@ public interface Link {
 
     void close();
 
+    /**
+     * Anything the transport itself knows that is worth showing: the rate it has settled on,
+     * how long packets are waiting, what it is losing. The session merges this into the
+     * statistics it sends the viewer, so the panel shows the same numbers whichever transport
+     * is underneath - and shows nothing extra for the one that has nothing to tell.
+     */
+    default java.util.Map<String, Object> extra() {
+        return java.util.Map.of();
+    }
+
     /** Called by the transport when a complete message arrives from the client. */
     interface Inbound {
         void message(ByteBuffer message);
@@ -38,5 +48,11 @@ public interface Link {
 
         /** The transport's queue has drained: there is room to send more. */
         default void drained() {}
+
+        /**
+         * A message handed to the transport will not arrive after all - the view changed, or
+         * its deadline passed. Whatever was assumed about the client holding it is not true.
+         */
+        default void abandoned(ByteBuffer message) {}
     }
 }

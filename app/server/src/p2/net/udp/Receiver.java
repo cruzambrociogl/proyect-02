@@ -53,7 +53,8 @@ public final class Receiver {
     public void epoch(int epoch) {
         this.epoch = epoch;
         for (Iterator<Map.Entry<Integer, Partial>> it = partial.entrySet().iterator(); it.hasNext(); ) {
-            if (it.next().getValue().epoch < epoch) {
+            int held = it.next().getValue().epoch;
+            if (held != 0 && held < epoch) {
                 it.remove();
                 unitsStale++;
             }
@@ -83,7 +84,9 @@ public final class Receiver {
         lastMicros = micros;
         lastArrivalNanos = System.nanoTime();
 
-        if (header.epoch() < epoch || finishedSet.contains(header.unit())) {
+        // Epoch zero means the message is not about any particular view - the shape of an
+        // image, a fault, statistics - so it never goes stale.
+        if ((header.epoch() != 0 && header.epoch() < epoch) || finishedSet.contains(header.unit())) {
             unitsStale++;
             return;
         }
@@ -145,10 +148,10 @@ public final class Receiver {
         // read as a round trip of no time at all - which would become the path's floor and
         // make its propagation delay look like a queue for ever after. Zero means "no timing
         // in this report", and the sender skips it.
-        if (packets == 0) return new Report(0, 0, 0, 0, credit(), partial.size(), truncated, needs);
+        if (packets == 0) return new Report(0, 0, 0, 0, credit(), epoch, partial.size(), truncated, needs);
 
         int hold = (int) ((System.nanoTime() - lastArrivalNanos) / 1000L);
-        return new Report(lastMicros, Math.max(0, hold), packets, highest, credit(),
+        return new Report(lastMicros, Math.max(0, hold), packets, highest, credit(), epoch,
                 partial.size(), truncated, needs);
     }
 

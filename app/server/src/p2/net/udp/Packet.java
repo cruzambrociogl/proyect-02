@@ -33,6 +33,14 @@ public final class Packet {
     public static final int DATA = 10;
     /** client -> server: what I have received, how long I held it, and what I still need. */
     public static final int REPORT = 11;
+    /**
+     * client -> server: one whole message of the ordinary protocol - hello, open, view.
+     *
+     * These are small enough to fit in a datagram and describe how things are rather than
+     * something that happened, so they are simply repeated until the answer shows they
+     * arrived, instead of being acknowledged or repaired.
+     */
+    public static final int CONTROL = 12;
 
     /** Biggest datagram this protocol ever sends: header, symbol header, one symbol. */
     public static final int MAX_DATAGRAM = HEADER + DataHeader.BYTES + p2.fec.Block.SYMBOL_BYTES;

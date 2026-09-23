@@ -36,8 +36,29 @@ public final class Sender {
         void symbol(Packet.DataHeader header, byte[] data);
     }
 
-    /** Units the viewer is waiting on, and units we think it will want. */
-    public enum Class { VISIBLE, PREFETCH }
+    /**
+     * Told about a message that will not be delivered after all, because the viewer moved on
+     * or its deadline passed.
+     *
+     * Dropping work is the point of the deadlines and the classes, but whoever handed it over
+     * has to hear about it. The session keeps a ledger of what the viewer holds, and writes a
+     * unit into that ledger when it hands it to the transport; if the transport then quietly
+     * abandons it, the ledger says the viewer has a tile that was never sent and nothing will
+     * ever ask for it again - a hole in the picture that no amount of waiting fills.
+     */
+    public interface Abandoned {
+        void message(byte[] message);
+    }
+
+    /**
+     * What a message is for, in the order it is sent.
+     *
+     * URGENT is the protocol talking about itself - the answer to a hello, the shape of an
+     * image, a fault, the statistics behind the panel. It goes first because it is small and
+     * everything else waits on it, and it survives a change of view: the viewer moving does
+     * not make the answer to its question stale.
+     */
+    public enum Class { URGENT, VISIBLE, PREFETCH }
 
     private final Out out;
     private final List<Outgoing> outgoing = new ArrayList<>();
@@ -56,8 +77,14 @@ public final class Sender {
     private long lastReportNanos, lastReceived, lastSymbolsSent;
     private boolean starved;                          // the queue of work ran dry since the last measure
 
+    private Abandoned abandoned = message -> {};
+
     public Sender(Out out) {
         this.out = out;
+    }
+
+    public void onAbandoned(Abandoned abandoned) {
+        this.abandoned = abandoned;
     }
 
     /** One whole protocol message to deliver, if it can be delivered in time. */
@@ -74,9 +101,10 @@ public final class Sender {
         this.epoch = epoch;
         for (Iterator<Outgoing> it = outgoing.iterator(); it.hasNext(); ) {
             Outgoing unit = it.next();
-            if (unit.epoch < epoch && unit.klass == Class.VISIBLE) {
+            if (unit.epoch < epoch && unit.klass != Class.URGENT) {
                 it.remove();
                 unitsDropped++;
+                abandoned.message(unit.message);
             }
         }
     }
@@ -133,6 +161,18 @@ public final class Sender {
                 }
             }
         }
+        // The receiver has thrown away everything older than the view it is on now, so its
+        // silence about those units means the opposite of delivery. They go back to whoever
+        // offered them, as work still to do, rather than being quietly counted as done.
+        for (Iterator<Outgoing> it = outgoing.iterator(); it.hasNext(); ) {
+            Outgoing unit = it.next();
+            if (unit.klass != Class.URGENT && unit.epoch != 0 && unit.epoch < report.epoch()) {
+                it.remove();
+                unitsDropped++;
+                abandoned.message(unit.message);
+            }
+        }
+
         if (report.truncated()) return;        // it had more to say than fitted: prove nothing from silence
         long now = System.nanoTime();
         long hold = (long) (rttMicros * 2.5 + 30_000) * 1000L;
@@ -216,6 +256,7 @@ public final class Sender {
             if (!unit.sentEverything() && now > unit.deadlineNanos) {
                 it.remove();
                 unitsDropped++;
+                abandoned.message(unit.message);
             }
         }
     }

@@ -43,6 +43,9 @@ public final class Wire {
     public static final int BYE = 8;
     /** server -> client: how this session is going (payload: JSON), for the viewer's panel. */
     public static final int STATS = 9;
+    // 10 to 15 are packet types, not message types: see p2.net.udp.Packet.
+    /** bridge -> client: what the client's own side of the path sees (payload: JSON). */
+    public static final int PATH = 16;
 
     private Wire() {}
 

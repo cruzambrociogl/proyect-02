@@ -25,7 +25,13 @@ import java.util.List;
  * A report is a snapshot, not an event: losing one costs nothing, because the next one carries
  * the whole picture again. That is why there is no acknowledgement of reports either.
  *
- * One field exists only because of what the sender reads into silence. A unit a report does
+ * The epoch is there for the same reason. The receiver throws away symbols for a view the
+ * viewer has already left, so a sender that read its silence about those units as delivery
+ * would leave holes on the screen that nothing would ever fill. Both ends apply the same rule
+ * to the same number: everything older than this epoch is gone, and the sender puts it back on
+ * the list of what the viewer still needs.
+ *
+ * One more field exists only because of what the sender reads into silence. A unit a report does
  * not mention is taken to have arrived - that is how a transfer ends without an
  * acknowledgement. A report that ran out of room in its datagram is silent about units for the
  * opposite reason, and a sender that could not tell the two apart would throw away exactly the
@@ -33,7 +39,7 @@ import java.util.List;
  * list says {@code truncated}, and the sender frees nothing on it.
  */
 public record Report(int echoMicros, int holdMicros, int received, int highestSequence,
-                     int credit, int incomplete, boolean truncated, List<Need> needs) {
+                     int credit, int epoch, int incomplete, boolean truncated, List<Need> needs) {
 
     /** "For this block of this unit, send me this many more symbols - whichever ones." */
     public record Need(int unit, int block, int count) {}
@@ -41,7 +47,7 @@ public record Report(int echoMicros, int holdMicros, int received, int highestSe
     /** How many needs fit in one datagram alongside the fixed part. */
     public static final int MAX_NEEDS = 100;
 
-    private static final int FIXED = 25;
+    private static final int FIXED = 29;
     private static final int NEED_BYTES = 8;
 
     public void writeTo(ByteBuffer out) {
@@ -50,6 +56,7 @@ public record Report(int echoMicros, int holdMicros, int received, int highestSe
         out.putInt(received);
         out.putInt(highestSequence);
         out.putInt(credit);
+        out.putInt(epoch);
         out.putShort((short) Math.min(0xffff, incomplete));
         out.put((byte) (truncated ? 1 : 0));
         int count = Math.min(needs.size(), MAX_NEEDS);
@@ -64,7 +71,7 @@ public record Report(int echoMicros, int holdMicros, int received, int highestSe
 
     public static Report readFrom(ByteBuffer in) {
         int echo = in.getInt(), hold = in.getInt(), received = in.getInt();
-        int highest = in.getInt(), credit = in.getInt();
+        int highest = in.getInt(), credit = in.getInt(), epoch = in.getInt();
         int incomplete = in.getShort() & 0xffff;
         boolean truncated = in.get() != 0;
         int count = in.getShort() & 0xffff;
@@ -72,7 +79,7 @@ public record Report(int echoMicros, int holdMicros, int received, int highestSe
         for (int i = 0; i < count && in.remaining() >= NEED_BYTES; i++) {
             needs.add(new Need(in.getInt(), in.getShort() & 0xffff, in.getShort() & 0xffff));
         }
-        return new Report(echo, hold, received, highest, credit, incomplete, truncated, needs);
+        return new Report(echo, hold, received, highest, credit, epoch, incomplete, truncated, needs);
     }
 
     public int bytes() {
