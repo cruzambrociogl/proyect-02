@@ -92,12 +92,13 @@ class Socket:
 
 
 class Chrome:
-    def __init__(self, port=9333, window="1500,950"):
+    def __init__(self, port=9333, window="1500,950", dpr=None):
         self.process = subprocess.Popen(
             # SwiftShader gives headless Chrome a working WebGL2, which the splat renderer needs.
             [CHROME, "--headless=new", "--hide-scrollbars",
              "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
              f"--remote-debugging-port={port}", f"--window-size={window}",
+             *( [f"--force-device-scale-factor={dpr}"] if dpr else [] ),
              "--no-first-run", "--user-data-dir=/tmp/p2-chrome", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         target = None
@@ -134,15 +135,22 @@ def main():
     ap.add_argument("--shot", default=None)
     ap.add_argument("--eval", action="append", default=[], help="JavaScript to run at the end")
     ap.add_argument("--window", default="1500,950")
+    ap.add_argument("--dpr", default=None, help="pretend to be a screen of this pixel ratio")
+    ap.add_argument("--resize", default=None, help="W,H to resize the viewport to, after --wait")
     ap.add_argument("--script", default=None, help="file of JavaScript to run before --eval")
     args = ap.parse_args()
 
-    chrome = Chrome(window=args.window)
+    chrome = Chrome(window=args.window, dpr=args.dpr)
     try:
         chrome.call("Page.enable")
         chrome.call("Runtime.enable")
         chrome.call("Page.navigate", url=args.url)
         time.sleep(args.wait)
+        if args.resize:
+            w, h = (int(v) for v in args.resize.split(","))
+            chrome.call("Emulation.setDeviceMetricsOverride", width=w, height=h,
+                        deviceScaleFactor=float(args.dpr or 0), mobile=False)
+            time.sleep(1.5)
         if args.script:
             with open(args.script) as f:
                 chrome.call("Runtime.evaluate", expression=f.read(), awaitPromise=True,

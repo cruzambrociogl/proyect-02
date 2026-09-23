@@ -153,10 +153,51 @@ function sendView(force = false) {
 
 // ----------------------------------------------------------------- input
 
+/**
+ * Give the canvas as many real pixels as the screen has, and pin its displayed size to what
+ * was actually measured.
+ *
+ * Two sizes exist and they must be kept in step: the backing store (canvas.width, the pixels
+ * drawn into) and the box on the page (CSS pixels, what the mouse is reported in). The
+ * stylesheet stretches the canvas to fill the stage, so if the backing store is sized from a
+ * stale or rounded measurement the browser quietly scales the drawing to fit - the picture
+ * lands in the wrong place and at the wrong size, and clicks no longer point at what they
+ * appear to point at. Writing both sizes together, from one measurement, is what stops that.
+ *
+ * The pixel ratio is capped at 2: beyond that a screenful costs more tiles than it is worth.
+ */
 function sizeCanvas() {
   const box = stage.getBoundingClientRect();
-  canvas.width = Math.max(320, Math.floor(box.width));
-  canvas.height = Math.max(240, Math.floor(box.height));
+  const ratio = Math.min(devicePixelRatio || 1, 2);
+  const width = Math.max(320, Math.round(box.width * ratio));
+  const height = Math.max(240, Math.round(box.height * ratio));
+  canvas.style.width = `${box.width}px`;
+  canvas.style.height = `${box.height}px`;
+  if (canvas.width === width && canvas.height === height) return false;
+  canvas.width = width;
+  canvas.height = height;
+  return true;
+}
+
+/**
+ * Where an event happened, in the pixels the scene draws in.
+ *
+ * Measured from the box on the page rather than assumed, so it stays right even if the two
+ * sizes have drifted apart for a moment - during a resize, a change of screen, or a zoom of
+ * the page itself.
+ */
+function atCanvas(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+/** How many canvas pixels one CSS pixel of movement is worth. */
+function pointerScale() {
+  const rect = canvas.getBoundingClientRect();
+  return { x: canvas.width / rect.width, y: canvas.height / rect.height };
 }
 
 function resize() {
@@ -172,8 +213,8 @@ function resize() {
 stage.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (!chart) return;
-  const rect = canvas.getBoundingClientRect();
-  scene.zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.exp(e.deltaY * 0.0015));
+  const at = atCanvas(e);
+  scene.zoomAt(at.x, at.y, Math.exp(e.deltaY * 0.0015));
   dirty = true;
   sendView();
 }, { passive: false });
@@ -186,7 +227,8 @@ stage.addEventListener('pointerdown', (e) => {
 });
 stage.addEventListener('pointermove', (e) => {
   if (!dragging || !chart) return;
-  scene.panByScreen(e.clientX - dragging.x, e.clientY - dragging.y);
+  const step = pointerScale();
+  scene.panByScreen((e.clientX - dragging.x) * step.x, (e.clientY - dragging.y) * step.y);
   dragging = { x: e.clientX, y: e.clientY };
   dirty = true;
   sendView();
@@ -197,8 +239,8 @@ stage.addEventListener('pointercancel', endDrag);
 
 stage.addEventListener('dblclick', (e) => {
   if (!chart) return;
-  const rect = canvas.getBoundingClientRect();
-  scene.zoomAt(e.clientX - rect.left, e.clientY - rect.top, 0.5);
+  const at = atCanvas(e);
+  scene.zoomAt(at.x, at.y, 0.5);
   dirty = true;
   sendView(true);
 });
@@ -311,7 +353,10 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+// A window resize is not the only way the stage changes size - a different screen, the page
+// zoomed, the window moved to another monitor - so watch the box itself as well.
 addEventListener('resize', resize);
+new ResizeObserver(resize).observe(stage);
 sizeCanvas();
 connect();
 setInterval(updatePanel, 100);
