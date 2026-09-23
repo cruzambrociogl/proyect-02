@@ -40,6 +40,7 @@ def font(size, bold=False):
 
 class Sheet:
     def __init__(self, width, height):
+        self.size = (width, height)
         self.image = Image.new("RGB", (width * SCALE, height * SCALE), PAPER)
         self.draw = ImageDraw.Draw(self.image)
 
@@ -78,7 +79,7 @@ class Sheet:
         return fitted.size[0] // SCALE, fitted.size[1] // SCALE
 
     def save(self, path):
-        self.image.resize((W, H), Image.LANCZOS).save(path, quality=95)
+        self.image.resize(self.size, Image.LANCZOS).save(path, quality=95)
 
 
 def stage(sheet, box, title, lines, built, colour=OURS):
