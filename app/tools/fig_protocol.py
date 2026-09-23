@@ -17,7 +17,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fig_pipeline import BAND, BORROWED, DIM, INK, OURS, PAPER, RULE, Sheet  # noqa: E402
+from fig_pipeline import (BAND, BORROWED, DIM, INK, OURS, PAPER, RULE, Sheet,  # noqa: E402
+                          language)
 
 W, H = 2400, 3260
 LOST = (196, 62, 58)
@@ -99,8 +100,12 @@ def strip(sheet, x, y, width, fields, height=44):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--lang", default="en", choices=("en", "es"))
     ap.add_argument("--out", default="../docs/protocol.png")
     args = ap.parse_args()
+    if args.lang == "es":
+        from fig_spanish import WORDS
+        language(WORDS)
 
     sheet = Sheet(W, H)
     sheet.text((60, 40), "The protocol", size=34, bold=True)

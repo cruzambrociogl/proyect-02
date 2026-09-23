@@ -26,6 +26,17 @@ BAND = (246, 246, 248)
 W, H = 2400, 1460
 SCALE = 2                       # drawn at twice the size, then reduced: cheap antialiasing
 
+# Every piece of text on either figure passes through Sheet.text, so one lookup there is the
+# whole of the translation. A string with no entry is drawn as it is and reported at the end,
+# which is how a missing translation is found rather than quietly shipped in English.
+WORDS = {}
+SEEN = []
+
+
+def language(words):
+    WORDS.clear()
+    WORDS.update(words)
+
 
 def font(size, bold=False):
     for path in (("/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold
@@ -45,6 +56,8 @@ class Sheet:
         self.draw = ImageDraw.Draw(self.image)
 
     def text(self, xy, text, size=18, bold=False, fill=INK, anchor="la"):
+        SEEN.append(text)
+        text = WORDS.get(text, text)
         self.draw.text((xy[0] * SCALE, xy[1] * SCALE), text,
                        font=font(size * SCALE, bold), fill=fill, anchor=anchor)
 
@@ -80,6 +93,15 @@ class Sheet:
 
     def save(self, path):
         self.image.resize(self.size, Image.LANCZOS).save(path, quality=95)
+        if os.environ.get("P2_STRINGS"):
+            for line in SEEN:
+                print(repr(line))
+        elif WORDS:
+            missing = [line for line in SEEN if line.strip() and line not in WORDS]
+            if missing:
+                print(f"{len(missing)} strings still in English:")
+                for line in missing[:40]:
+                    print("   ", repr(line))
 
 
 def stage(sheet, box, title, lines, built, colour=OURS):
@@ -108,8 +130,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", default="images/.prepared/ladder-tiles/holbein_8000.jpg")
     ap.add_argument("--screen", default=None, help="a screenshot of the viewer, optional")
+    ap.add_argument("--lang", default="en", choices=("en", "es"))
     ap.add_argument("--out", default="../docs/pipeline.png")
     args = ap.parse_args()
+    if args.lang == "es":
+        from fig_spanish import WORDS
+        language(WORDS)
 
     sheet = Sheet(W, H)
     sheet.text((60, 40), "From the file to the screen", size=34, bold=True)
