@@ -10,7 +10,20 @@ import { Panel, human, zoomLabel } from './panel.js';
 import { rendererFor } from './renderers.js';
 
 const VIEW_INTERVAL_MS = 60;        // at most this often while the view keeps changing
-const BUDGET_BYTES = 50 * 1024 * 1024;
+
+// How much decoded image to hold. Adjustable from the address bar - ?budget=24 - because the
+// interesting question about a viewer is what it gives up when it is given less.
+const BUDGET_BYTES = Math.max(8, Number(new URLSearchParams(location.search).get('budget')) || 50)
+  * 1024 * 1024;
+
+// What to keep while the tab is in the background: enough to draw something at once when it
+// comes back, not a screenful of detail nobody is looking at.
+const HIDDEN_BYTES = 4 * 1024 * 1024;
+
+// A canvas this big already has more pixels than any image detail the eye will find, and each
+// one costs four bytes several times over - the browser keeps more than one buffer. On a large
+// screen at twice the pixel ratio the canvas alone can cost forty megabytes.
+const MAX_CANVAS_PIXELS = 4.5e6;
 
 const $ = (id) => document.getElementById(id);
 const stage = document.querySelector('.stage');
@@ -168,7 +181,9 @@ function sendView(force = false) {
  */
 function sizeCanvas() {
   const box = stage.getBoundingClientRect();
-  const ratio = Math.min(devicePixelRatio || 1, 2);
+  let ratio = Math.min(devicePixelRatio || 1, 2);
+  const pixels = box.width * box.height * ratio * ratio;
+  if (pixels > MAX_CANVAS_PIXELS) ratio *= Math.sqrt(MAX_CANVAS_PIXELS / pixels);
   const width = Math.max(320, Math.round(box.width * ratio));
   const height = Math.max(240, Math.round(box.height * ratio));
   canvas.style.width = `${box.width}px`;
@@ -357,10 +372,27 @@ function frame() {
 // zoomed, the window moved to another monitor - so watch the box itself as well.
 addEventListener('resize', resize);
 new ResizeObserver(resize).observe(stage);
+
+// Nobody is looking: hold almost nothing. What is dropped is reported to the server the usual
+// way, so it will be sent again when it is wanted.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) scene.shrink(HIDDEN_BYTES);
+  else { dirty = true; sendView(true); }
+});
 sizeCanvas();
 connect();
 setInterval(updatePanel, 100);
 requestAnimationFrame(frame);
+
+// A handle for measuring from outside: what is held, and a way to drop it all. The bench and
+// the memory traces use this; nothing in the viewer itself does.
+globalThis.p2 = {
+  scene,
+  held: () => ({ units: scene.units.size, bytes: scene.heldBytes, budget: scene.budget,
+                 evicted: scene.evictions }),
+  budget: (bytes) => { scene.budget = bytes; scene.evict(); dirty = true; },
+  drop: () => { scene.clear(); dirty = true; },
+};
 
 const requested = new URLSearchParams(location.search).get('image');
 if (requested) open(requested);

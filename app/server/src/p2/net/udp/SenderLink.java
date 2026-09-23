@@ -97,6 +97,9 @@ public final class SenderLink implements Link {
         out.put("queueMicros", control.queueMicros());
         out.put("floorMicros", control.rttMinMicros());
         out.put("loss", sender.lossRate());
+        out.put("queued", sender.queued());
+        out.put("truncated", sender.truncatedReports());
+        out.put("receiverHolds", sender.heldByReceiver());
         out.put("symbols", sender.symbolsSent());
         out.put("unitsDelivered", sender.unitsDelivered());
         out.put("unitsDropped", sender.unitsDropped());

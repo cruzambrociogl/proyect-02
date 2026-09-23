@@ -175,9 +175,27 @@ export class Scene {
     }
   }
 
-  /** What has been evicted since the last call, to ride along with the next view message. */
-  takeDropped() {
-    const out = this.dropped.slice(0, 400);
+  /**
+   * Hold less for a while - while nobody is looking at the tab, say. The budget itself is not
+   * changed, so the next thing drawn fills the cache back up to it.
+   */
+  shrink(bytes) {
+    const budget = this.budget;
+    this.budget = bytes;
+    this.evict();
+    this.budget = budget;
+  }
+
+  /**
+   * What has been evicted since the last call, to ride along with the next view message.
+   *
+   * Bounded, because a view message has to fit in one datagram: the protocol never splits a
+   * message across packets, so a hundred dropped units is about what there is room for beside
+   * the rest of the message. Whatever does not fit goes with the next view, a few tens of
+   * milliseconds later - they are a stream, not an event.
+   */
+  takeDropped(limit = 100) {
+    const out = this.dropped.slice(0, limit);
     this.dropped = this.dropped.slice(out.length);
     return out;
   }

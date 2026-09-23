@@ -76,6 +76,8 @@ public final class Sender {
     private final java.util.ArrayDeque<Long> recentlySent = new java.util.ArrayDeque<>();
     private long lastReportNanos, lastReceived, lastSymbolsSent;
     private boolean starved;                          // the queue of work ran dry since the last measure
+    private boolean lastTruncated;                    // the last report could not name everything
+    private int lastIncomplete;                       // units the receiver was still holding
 
     private Abandoned abandoned = message -> {};
 
@@ -126,6 +128,26 @@ public final class Sender {
 
     public long bytesSent() { return bytesSent; }
 
+    public boolean truncatedReports() { return lastTruncated; }
+
+    /** What is being held and why, for a trace when the queue stops moving. */
+    public String describe() {
+        StringBuilder out = new StringBuilder();
+        long now = System.nanoTime();
+        int shown = 0;
+        for (Outgoing unit : outgoing) {
+            if (shown++ >= 4) break;
+            out.append(String.format("[id %d epoch %d %s owed %d finished %s ago %.0f ms] ",
+                    unit.id, unit.epoch, unit.klass,
+                    java.util.Arrays.stream(unit.owed).sum(),
+                    unit.finishedAtNanos == 0 ? "no" : "yes",
+                    unit.finishedAtNanos == 0 ? 0 : (now - unit.finishedAtNanos) / 1e6));
+        }
+        return out.toString();
+    }
+
+    public int heldByReceiver() { return lastIncomplete; }
+
     /**
      * What the receiver said.
      *
@@ -141,6 +163,8 @@ public final class Sender {
      * receiver takes to notice a gap, plus the trip back.
      */
     public void report(Report report, int nowMicros) {
+        lastTruncated = report.truncated();
+        lastIncomplete = report.incomplete();
         lossRate = 0.75 * lossRate + 0.25 * report.lossRate();
         credit = report.credit();
         int sample = nowMicros - report.echoMicros() - report.holdMicros();

@@ -82,6 +82,18 @@ public final class Bridge implements Link.Inbound {
      */
     @Override
     public void message(ByteBuffer message) {
+        try {
+            carry(message);
+        } catch (RuntimeException problem) {
+            // This runs on the socket's own thread. An exception that escapes here kills that
+            // thread, and with it the session: no more messages in either direction, a viewer
+            // frozen half drawn with no error anywhere. One bad message is worth a line in the
+            // log, not the connection.
+            System.err.println("bridge: could not carry a message: " + problem);
+        }
+    }
+
+    private void carry(ByteBuffer message) {
         byte[] bytes = new byte[message.remaining()];
         message.duplicate().get(bytes);
         ByteBuffer header = ByteBuffer.wrap(bytes);
@@ -175,8 +187,8 @@ public final class Bridge implements Link.Inbound {
                 Thread.sleep(2);
             } catch (InterruptedException stop) {
                 return;
-            } catch (IOException problem) {
-                System.err.println("bridge: " + problem);
+            } catch (IOException | RuntimeException problem) {
+                System.err.println("bridge: " + problem);   // one bad turn, not the end of the clock
             }
         }
     }
@@ -214,6 +226,15 @@ public final class Bridge implements Link.Inbound {
 
     /** Synchronised because the browser's thread and the clock's both send from here. */
     private synchronized void send(int type, byte[] payload) {
+        if (Packet.HEADER + payload.length > Packet.MAX_DATAGRAM) {
+            // One message, one datagram - so a control message that does not fit is a fault in
+            // whatever built it. Saying so is better than throwing: this used to escape and
+            // take the thread with it whenever a viewer dropped enough tiles at once to make
+            // its next view message too long.
+            System.err.println("bridge: a control message of " + payload.length
+                    + " bytes does not fit in a datagram, so it was not sent");
+            return;
+        }
         try {
             Packet.header(out, type, 0, sequence++, Packet.now());
             out.put(payload);

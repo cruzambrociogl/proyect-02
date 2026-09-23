@@ -92,11 +92,14 @@ class Socket:
 
 
 class Chrome:
-    def __init__(self, port=9333, window="1500,950", dpr=None):
+    def __init__(self, port=9333, window="1500,950", dpr=None, software_gl=True):
+        # SwiftShader gives headless Chrome a working WebGL2, which the splat renderer needs -
+        # but it holds hundreds of megabytes of its own, so any measurement of what the page
+        # costs has to be taken with the real driver instead.
+        gl = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"] \
+            if software_gl else []
         self.process = subprocess.Popen(
-            # SwiftShader gives headless Chrome a working WebGL2, which the splat renderer needs.
-            [CHROME, "--headless=new", "--hide-scrollbars",
-             "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+            [CHROME, "--headless=new", "--hide-scrollbars", *gl,
              f"--remote-debugging-port={port}", f"--window-size={window}",
              *( [f"--force-device-scale-factor={dpr}"] if dpr else [] ),
              "--no-first-run", "--user-data-dir=/tmp/p2-chrome", "about:blank"],
@@ -128,6 +131,24 @@ class Chrome:
         self.process.terminate()
 
 
+def report_rss(chrome):
+    """What the browser's processes are holding right now, as the task manager would show."""
+    out = subprocess.run(["ps", "-Ao", "rss,command"], capture_output=True, text=True).stdout
+    rows, total = [], 0
+    for line in out.splitlines():
+        if "/tmp/p2-chrome" not in line:
+            continue
+        rss = int(line.split()[0]) * 1024
+        total += rss
+        kind = ("renderer" if "--type=renderer" in line else
+                "gpu" if "--type=gpu-process" in line else
+                "utility" if "--type=utility" in line else "browser")
+        rows.append((kind, rss))
+    rows.sort(key=lambda r: -r[1])
+    print("   " + "  ".join(f"{k} {v / 1e6:.0f}" for k, v in rows if k in ("renderer", "gpu"))
+          + f"  ·  all {total / 1e6:.0f} MB")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
@@ -137,10 +158,12 @@ def main():
     ap.add_argument("--window", default="1500,950")
     ap.add_argument("--dpr", default=None, help="pretend to be a screen of this pixel ratio")
     ap.add_argument("--resize", default=None, help="W,H to resize the viewport to, after --wait")
+    ap.add_argument("--rss", action="store_true", help="report what the browser's processes hold")
+    ap.add_argument("--real-gl", action="store_true", help="use the machine's own driver")
     ap.add_argument("--script", default=None, help="file of JavaScript to run before --eval")
     args = ap.parse_args()
 
-    chrome = Chrome(window=args.window, dpr=args.dpr)
+    chrome = Chrome(window=args.window, dpr=args.dpr, software_gl=not args.real_gl)
     try:
         chrome.call("Page.enable")
         chrome.call("Runtime.enable")
@@ -160,6 +183,28 @@ def main():
                                  returnByValue=True)
             value = result.get("result", {}).get("value")
             print(json.dumps(value, indent=1) if isinstance(value, (dict, list)) else value)
+            if args.rss:
+                report_rss(chrome)
+        if args.rss and False:
+            metrics = {m["name"]: m["value"] for m in
+                       chrome.call("Performance.getMetrics").get("metrics", [])}
+            print(f"js heap    {metrics.get('JSHeapUsedSize', 0) / 1e6:8.1f} MB used, "
+                  f"{metrics.get('JSHeapTotalSize', 0) / 1e6:.1f} MB reserved")
+            print(f"documents  {metrics.get('Documents', 0):.0f}, "
+                  f"nodes {metrics.get('Nodes', 0):.0f}, listeners {metrics.get('JSEventListeners', 0):.0f}")
+            out = subprocess.run(["ps", "-Ao", "rss,command"], capture_output=True, text=True).stdout
+            total = 0
+            for line in out.splitlines():
+                if "/tmp/p2-chrome" not in line:
+                    continue
+                rss = int(line.split()[0]) * 1024
+                total += rss
+                kind = "renderer" if "--type=renderer" in line else (
+                    "gpu" if "--type=gpu-process" in line else (
+                        "utility" if "--type=utility" in line else "browser"))
+                if rss > 40_000_000 or kind in ("renderer", "gpu"):
+                    print(f"{kind:10} {rss / 1e6:8.1f} MB")
+            print(f"{'all chrome':10} {total / 1e6:8.1f} MB")
         if args.shot:
             shot = chrome.call("Page.captureScreenshot", format="png")
             with open(args.shot, "wb") as f:
