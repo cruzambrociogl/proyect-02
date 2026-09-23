@@ -53,7 +53,7 @@ async function showPicker() {
   list.replaceChildren();
   if (!ready.length) {
     list.innerHTML = '<p class="empty">No prepared images yet. '
-      + '<a href="/">Open the server page</a> to add or prepare one.</p>';
+      + '<a href="/" target="_blank" rel="noopener">Open the server page</a> to add or prepare one.</p>';
     return;
   }
   for (const image of ready) {

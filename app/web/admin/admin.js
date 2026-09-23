@@ -98,6 +98,10 @@ function card(image) {
     const open = document.createElement('a');
     open.className = 'button';
     open.href = `/viewer?image=${encodeURIComponent(image.name)}`;
+    // A new tab: the server page is where preparing is watched, and following a link away
+    // from it loses that. rel=noopener because a new tab should not be able to reach back.
+    open.target = '_blank';
+    open.rel = 'noopener';
     open.textContent = 'View';
     row.append(open);
     const again = document.createElement('button');
