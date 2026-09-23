@@ -2,7 +2,7 @@ package p2.net.udp;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -31,7 +31,9 @@ public final class Receiver {
     }
 
     private final Out out;
-    private final Map<Integer, Partial> partial = new HashMap<>();
+    // in the order the units first appeared, so the oldest are asked about first and a long
+    // queue of needs cannot starve the units that have been waiting longest
+    private final Map<Integer, Partial> partial = new LinkedHashMap<>();
     private final ArrayDeque<Integer> finished = new ArrayDeque<>();   // recent, so late symbols are ignored
     private final java.util.Set<Integer> finishedSet = new java.util.HashSet<>();
 
@@ -71,6 +73,9 @@ public final class Receiver {
 
     public int packets() { return packets; }
 
+    /** Units part-built and still waiting for symbols. */
+    public int partial() { return partial.size(); }
+
     /** Takes one DATA packet: its header, and the symbol bytes that follow. */
     public void accept(int sequence, int micros, Packet.DataHeader header, byte[] symbol) {
         packets++;
@@ -103,18 +108,48 @@ public final class Receiver {
     public Report report() {
         long now = System.nanoTime();
         List<Report.Need> needs = new ArrayList<>();
+        boolean truncated = false;
         for (Map.Entry<Integer, Partial> entry : partial.entrySet()) {
             Partial unit = entry.getValue();
-            if (now - unit.lastArrivalNanos < quietMicros * 1000L) continue;
-            if (now - unit.lastAskNanos < quietMicros * 1000L) continue;
+            boolean arriving = now - unit.lastArrivalNanos < quietMicros * 1000L;
+            boolean askedRecently = now - unit.lastAskNanos < quietMicros * 1000L;
+
+            // Every unit being held is named, every time. Only the ones that have gone quiet
+            // ask for symbols; the rest are named with a count of zero, which means "still
+            // here, send nothing yet". That is what makes the sender's rule safe: it frees a
+            // unit when the receiver stops naming it, and the receiver stops naming a unit
+            // only when it no longer holds it. A unit left out to save room, or because it
+            // was asked about a moment ago, would be thrown away by a sender that had every
+            // reason to think it had arrived.
+            int[] missing = (arriving || askedRecently) ? null : unit.decoder.missing();
+            int wanted = 0;
+            if (missing != null) {
+                for (int count : missing) {
+                    if (count > 0) wanted++;
+                }
+            }
+            if (needs.size() + Math.max(1, wanted) > Report.MAX_NEEDS) {
+                truncated = true;                  // say so: the sender must not read this as delivered
+                break;
+            }
+            if (missing == null) {
+                needs.add(new Report.Need(entry.getKey(), 0, 0));
+                continue;
+            }
             unit.lastAskNanos = now;
-            int[] missing = unit.decoder.missing();
-            for (int block = 0; block < missing.length && needs.size() < Report.MAX_NEEDS; block++) {
+            for (int block = 0; block < missing.length; block++) {
                 if (missing[block] > 0) needs.add(new Report.Need(entry.getKey(), block, missing[block]));
             }
         }
+        // Before anything has arrived there is nothing to echo, and a made-up stamp would be
+        // read as a round trip of no time at all - which would become the path's floor and
+        // make its propagation delay look like a queue for ever after. Zero means "no timing
+        // in this report", and the sender skips it.
+        if (packets == 0) return new Report(0, 0, 0, 0, credit(), partial.size(), truncated, needs);
+
         int hold = (int) ((System.nanoTime() - lastArrivalNanos) / 1000L);
-        return new Report(lastMicros, Math.max(0, hold), packets, highest, credit(), needs);
+        return new Report(lastMicros, Math.max(0, hold), packets, highest, credit(),
+                partial.size(), truncated, needs);
     }
 
     /** Room left for units in flight - the sender never sends more than this. */

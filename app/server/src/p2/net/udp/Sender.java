@@ -44,14 +44,17 @@ public final class Sender {
     private int nextUnitId = 1;
     private int epoch;
 
+    private final RateControl control = new RateControl();
     private double lossRate;
     private int credit = 1 << 20;
     private int rttMicros = 50_000;
-    private long bytesPerSecond = 6_000_000;          // replaced by the congestion control
     private double tokens;
     private long lastFillNanos = System.nanoTime();
 
     private long unitsOffered, unitsDelivered, unitsDropped, symbolsSent, bytesSent;
+    private final java.util.ArrayDeque<Long> recentlySent = new java.util.ArrayDeque<>();
+    private long lastReportNanos, lastReceived, lastSymbolsSent;
+    private boolean starved;                          // the queue of work ran dry since the last measure
 
     public Sender(Out out) {
         this.out = out;
@@ -78,9 +81,8 @@ public final class Sender {
         }
     }
 
-    public void rate(long bytesPerSecond) {
-        this.bytesPerSecond = Math.max(16_000, bytesPerSecond);
-    }
+    /** The rate control, for the panel and the traces. */
+    public RateControl control() { return control; }
 
     public int rttMicros() { return rttMicros; }
 
@@ -114,9 +116,14 @@ public final class Sender {
         lossRate = 0.75 * lossRate + 0.25 * report.lossRate();
         credit = report.credit();
         int sample = nowMicros - report.echoMicros() - report.holdMicros();
-        if (sample > 0 && sample < 5_000_000) rttMicros = (int) (0.8 * rttMicros + 0.2 * sample);
+        boolean timed = report.echoMicros() != 0 || report.holdMicros() != 0;
+        if (timed && sample > 0 && sample < 5_000_000) {
+            rttMicros = (int) (0.8 * rttMicros + 0.2 * sample);
+            control.sample(sample, deliveredRate(report));
+        }
 
         for (Report.Need need : report.needs()) {
+            if (need.count() == 0) continue;        // named only so we keep it: nothing to send yet
             for (Outgoing unit : outgoing) {
                 if (unit.id == need.unit() && need.block() < unit.owed.length) {
                     // one spare, plus the share the path is expected to swallow
@@ -126,6 +133,7 @@ public final class Sender {
                 }
             }
         }
+        if (report.truncated()) return;        // it had more to say than fitted: prove nothing from silence
         long now = System.nanoTime();
         long hold = (long) (rttMicros * 2.5 + 30_000) * 1000L;
         for (Iterator<Outgoing> it = outgoing.iterator(); it.hasNext(); ) {
@@ -145,12 +153,19 @@ public final class Sender {
      */
     public void pump() {
         fillTokens();
-        while (tokens >= Packet.MAX_DATAGRAM && credit > Packet.MAX_DATAGRAM) {
+        while (tokens >= Packet.MAX_DATAGRAM && credit > Packet.MAX_DATAGRAM
+                && inFlight() + Packet.MAX_DATAGRAM <= window()) {
             expire();
             Outgoing unit = next();
-            if (unit == null) return;
+            if (unit == null) {
+                starved = true;                        // room to send, nothing to send: not the path's fault
+                return;
+            }
             int block = unit.blockToSend();
-            if (block < 0) return;
+            if (block < 0) {
+                starved = true;
+                return;
+            }
 
             byte[] symbol = unit.encoder.symbol(block, unit.next[block]);
             Packet.DataHeader header = new Packet.DataHeader(
@@ -163,6 +178,7 @@ public final class Sender {
 
             symbolsSent++;
             bytesSent += Packet.MAX_DATAGRAM;
+            recentlySent.addLast(System.nanoTime());
             tokens -= Packet.MAX_DATAGRAM;
             credit -= Packet.MAX_DATAGRAM;
         }
@@ -178,9 +194,11 @@ public final class Sender {
 
     /** Earliest deadline first, with the visible class always ahead of the speculative one. */
     private Outgoing next() {
+        boolean speculation = control.allowsScavenger();
         Outgoing best = null;
         for (Outgoing unit : outgoing) {
             if (unit.sentEverything()) continue;
+            if (unit.klass == Class.PREFETCH && !speculation) continue;
             if (best == null
                     || (unit.klass.ordinal() < best.klass.ordinal())
                     || (unit.klass == best.klass && unit.deadlineNanos < best.deadlineNanos)) {
@@ -202,12 +220,77 @@ public final class Sender {
         }
     }
 
+    /**
+     * How much is on the wire right now: what was sent within the last round trip, since
+     * nothing sent longer ago than that can still be in the air.
+     *
+     * This is where the absence of acknowledgements shows. A protocol that acknowledges
+     * packets knows precisely what is outstanding; this one has to reason from the clock. The
+     * first attempt counted every unit not yet confirmed, and deadlocked: confirmation takes
+     * two round trips to arrive, by which time the window had been full for longer than that
+     * and nothing could be sent to trigger it.
+     */
+    private long inFlight() {
+        long cutoff = System.nanoTime() - Math.max(5_000, rttMicros) * 1000L;
+        while (!recentlySent.isEmpty() && recentlySent.peekFirst() < cutoff) recentlySent.pollFirst();
+        return (long) recentlySent.size() * Packet.MAX_DATAGRAM;
+    }
+
+    /**
+     * How much may be in the air at once: one round trip's worth of the current rate, and half
+     * as much again so the path does not run dry between reports. The pacing does most of the
+     * work; this is the backstop for when a measurement goes wrong.
+     */
+    private long window() {
+        return Math.max(8L * Packet.MAX_DATAGRAM,
+                (long) (control.rate() * (rttMicros / 1e6) * 1.5));
+    }
+
     private void fillTokens() {
         long now = System.nanoTime();
-        tokens += (now - lastFillNanos) / 1e9 * bytesPerSecond;
+        long rate = control.rate();
+        tokens += (now - lastFillNanos) / 1e9 * rate;
         lastFillNanos = now;
-        double burst = Math.max(4, bytesPerSecond * rttMicros / 1e6 / Packet.MAX_DATAGRAM);
+        double burst = Math.max(4, rate * rttMicros / 1e6 / Packet.MAX_DATAGRAM);
         tokens = Math.min(tokens, burst * Packet.MAX_DATAGRAM);
+    }
+
+    /**
+     * How fast bytes are arriving at the far end, from the count of packets two successive
+     * reports have seen. It is measured rather than assumed: the sender knows what it put on
+     * the wire, but only the receiver knows what came out the other side.
+     *
+     * It counts only while the sender was actually pushing as hard as its rate allows. A
+     * sender with nothing to send also delivers nothing, and reading that as a slow path would
+     * be a trap it could not climb out of: it would slow down, deliver less, read the path as
+     * slower still, and end up crawling on an empty link. So a stretch in which the queue of
+     * work ran dry is reported as no measurement at all rather than as a small one.
+     */
+    private long deliveredRate(Report report) {
+        long now = System.nanoTime();
+        if (lastReportNanos == 0) {
+            lastReportNanos = now;
+            lastReceived = report.received();
+            lastSymbolsSent = symbolsSent;
+            return 0;
+        }
+        // Measured over a long enough stretch to be worth believing. Packets arrive in clumps
+        // - a path with a queue in it releases them in bursts - so a rate taken over a few
+        // milliseconds can read several times the truth, and a sender pacing at a speed the
+        // path cannot carry fills the queue and keeps it full.
+        double seconds = (now - lastReportNanos) / 1e9;
+        if (seconds < 0.2) return 0;
+
+        long arrived = report.received() - lastReceived;
+        boolean ranDry = starved;
+
+        lastReportNanos = now;
+        lastReceived = report.received();
+        lastSymbolsSent = symbolsSent;
+        starved = false;
+
+        if (arrived <= 0 || ranDry) return 0;                      // we were the slow part, not the path
+        return (long) (arrived * (long) Packet.MAX_DATAGRAM / seconds);
     }
 
     private static boolean mentions(Report report, int unit) {

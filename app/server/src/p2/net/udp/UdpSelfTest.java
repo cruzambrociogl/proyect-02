@@ -223,7 +223,8 @@ public final class UdpSelfTest {
             for (int block = 0; block < missing.length; block++) {
                 if (missing[block] > 0) needs.add(new Report.Need(42, block, missing[block]));
             }
-            Report report = new Report(lastMicros, 0, packets, highest, 8 << 20, needs);
+            Report report = new Report(lastMicros, 0, packets, highest, 8 << 20,
+                    needs.size(), false, needs);
             ByteBuffer out = ByteBuffer.allocate(Packet.HEADER + report.bytes());
             Packet.header(out, Packet.REPORT, 1, packets, Packet.now());
             report.writeTo(out);

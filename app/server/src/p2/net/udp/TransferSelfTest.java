@@ -28,17 +28,20 @@ public final class TransferSelfTest {
 
     private static final int UNITS = 200;
     private static int failures;
+    private static boolean trace;
 
     public static void main(String[] args) throws Exception {
+        trace = args.length > 0 && args[0].equals("--trace");
         String[] paths = {
                 "delay=20ms,rate=50mbit",
                 "loss=2%,delay=25ms,jitter=5ms,rate=50mbit",
                 "loss=10%,delay=40ms,jitter=15ms,rate=20mbit,reorder=2%",
         };
-        System.out.printf("%-46s %-10s %-9s %-9s %-9s %s%n",
-                "path", "delivered", "overhead", "goodput", "latency", "result");
+        System.out.printf("%-46s %-10s %-9s %-9s %-9s %-9s %s%n",
+                "path", "delivered", "overhead", "goodput", "latency", "queue", "result");
         for (String path : paths) transfer(path);
         cancellation();
+        speculation();
         System.out.println(failures == 0 ? "\nall checks passed" : "\n" + failures + " CHECKS FAILED");
         if (failures > 0) System.exit(1);
     }
@@ -68,9 +71,9 @@ public final class TransferSelfTest {
             long started = System.nanoTime();
             for (int i = 0; i < UNITS; i++) {
                 offeredAt[i + 1] = System.nanoTime();
-                pair.sender.offer(units[i], 1, Sender.Class.VISIBLE, 10_000);
+                pair.sender.offer(units[i], 1, Sender.Class.VISIBLE, 60_000);
             }
-            pair.runUntil(() -> intact.get() + corrupt.get() >= UNITS, 60_000);
+            pair.runUntil(() -> intact.get() + corrupt.get() >= UNITS, 30_000);
             double seconds = (System.nanoTime() - started) / 1e9;
 
             double latency = 0;
@@ -84,13 +87,22 @@ public final class TransferSelfTest {
             long ideal = 0;
             for (byte[] unit : units) ideal += (long) Block.symbolCount(unit.length) * Packet.MAX_DATAGRAM;
 
+            if (intact.get() + corrupt.get() < UNITS) {
+                System.out.printf("  stalled: sender has %d queued, %d delivered, %d dropped; "
+                                + "receiver is part way through %d%n",
+                        pair.sender.queued(), pair.sender.unitsDelivered(),
+                        pair.sender.unitsDropped(), pair.receiver.partial());
+            }
             check(corrupt.get() == 0, setting + ": no unit arrived corrupt");
             check(intact.get() == UNITS, setting + ": every unit arrived (" + intact.get() + "/" + UNITS + ")");
-            System.out.printf("%-46s %-10s %-9s %-9s %-9s %s%n", setting,
+            check(pair.sender.control().queueMicros() < 250_000,
+                    setting + ": the queue it builds stays small");
+            System.out.printf("%-46s %-10s %-9s %-9s %-9s %-9s %s%n", setting,
                     intact.get() + "/" + UNITS,
                     String.format("%.0f%%", 100.0 * (pair.server.bytesSent() - ideal) / ideal),
                     String.format("%.1fmbit", payload * 8 / seconds / 1e6),
                     String.format("%.0fms", measured == 0 ? 0 : latency / measured),
+                    String.format("%.0fms", pair.sender.control().queueMicros() / 1000.0),
                     corrupt.get() == 0 && intact.get() == UNITS ? "intact" : "INCOMPLETE");
         }
     }
@@ -123,6 +135,54 @@ public final class TransferSelfTest {
         }
     }
 
+    /**
+     * Work sent on a guess must not delay work the viewer is actually waiting for. The same
+     * sixty visible units are sent twice: alone, and behind two hundred and forty speculative
+     * ones. If the second wait is much longer than the first, the guessing is costing the
+     * viewer time, which is the whole reason the speculative class exists.
+     */
+    private static void speculation() throws Exception {
+        System.out.println("\nspeculative work behind visible work");
+        byte[] unit = new byte[40_000];
+        new Random(9).nextBytes(unit);
+
+        double alone = visibleLatency(unit, 0);
+        double behind = visibleLatency(unit, 240);
+
+        check(behind < alone * 1.6, String.format(
+                "visible units are not held up by speculation (%.0fms against %.0fms)", behind, alone));
+        System.out.printf("  60 visible units alone: %.0fms each%n", alone);
+        System.out.printf("  the same 60 with 240 speculative units queued first: %.0fms each%n", behind);
+    }
+
+    private static double visibleLatency(byte[] unit, int speculative) throws Exception {
+        int visible = 60;
+        try (Pair pair = new Pair("delay=30ms,rate=10mbit", 64 << 20)) {
+            long[] offeredAt = new long[speculative + visible + 1];
+            double[] total = {0};
+            AtomicInteger arrived = new AtomicInteger();
+            pair.onMessage((id, message) -> {
+                if (id > speculative) {
+                    total[0] += (System.nanoTime() - offeredAt[id]) / 1e6;
+                    arrived.incrementAndGet();
+                }
+            });
+            long now = System.nanoTime();
+            for (int i = 1; i <= speculative; i++) {
+                offeredAt[i] = now;
+                pair.sender.offer(unit, 1, Sender.Class.PREFETCH, 30_000);
+            }
+            for (int i = speculative + 1; i <= speculative + visible; i++) {
+                offeredAt[i] = System.nanoTime();
+                pair.sender.offer(unit, 1, Sender.Class.VISIBLE, 30_000);
+            }
+            pair.runUntil(() -> arrived.get() >= visible, 60_000);
+            check(arrived.get() == visible,
+                    "every visible unit arrived (" + arrived.get() + "/" + visible + ")");
+            return arrived.get() == 0 ? 0 : total[0] / arrived.get();
+        }
+    }
+
     /** A server and a client, wired together the way the real ones will be. */
     private static final class Pair implements AutoCloseable {
         final UdpEndpoint server, client;
@@ -151,7 +211,6 @@ public final class TransferSelfTest {
                     throw new RuntimeException(problem);
                 }
             });
-            sender.rate(50_000_000 / 8);
 
             server.handler((from, packet) -> {
                 if (Packet.type(packet) != Packet.REPORT) return;
@@ -176,7 +235,7 @@ public final class TransferSelfTest {
         /** Drives both sides until the condition holds or the time runs out. */
         void runUntil(java.util.function.BooleanSupplier until, long millis) throws Exception {
             long deadline = System.currentTimeMillis() + millis;
-            long lastReport = 0;
+            long lastReport = 0, lastTrace = 0, traceStarted = System.nanoTime();
             while (System.currentTimeMillis() < deadline && !until.getAsBoolean()) {
                 synchronized (sender) { sender.pump(); }
                 long now = System.currentTimeMillis();
@@ -192,6 +251,12 @@ public final class TransferSelfTest {
                     report.writeTo(buffer);
                     buffer.flip();
                     client.send(buffer, serverAddress);
+                }
+                if (trace && now - lastTrace >= 200) {
+                    lastTrace = now;
+                    System.out.printf("    %5.1fs  %s  queued %d, sent %d%n",
+                            (System.nanoTime() - traceStarted) / 1e9, sender.control(),
+                            sender.queued(), sender.symbolsSent());
                 }
                 Thread.sleep(0, 200_000);
             }
