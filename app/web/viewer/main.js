@@ -98,7 +98,10 @@ function connect() {
         showError(String(e.message ?? e));
         return;
       }
-      epoch = 0;
+      // The epoch is not reset here. It counts views for the life of the connection, not of
+      // the image: the bridge and the server both take a lower epoch to mean an older view and
+      // throw its units away, so starting again at zero made every tile of the new image look
+      // stale and the canvas stayed black.
       sendView(true);
       fillImageFacts();
       dirty = true;

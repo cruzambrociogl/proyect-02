@@ -111,8 +111,9 @@ public final class Session implements Link.Inbound {
         held.clear();
         queue = List.of();
         queueAt = 0;
-        epoch = 0;
         unitsSent = bytesSent = unitsCancelled = viewsSeen = 0;
+        // The epoch is deliberately left alone: it counts the viewer's moves for as long as
+        // the session lasts, and both ends read a lower one as an older view.
 
         chart();
     }

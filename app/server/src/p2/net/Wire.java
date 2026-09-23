@@ -18,6 +18,11 @@ import java.nio.charset.StandardCharsets;
  * The epoch is what makes cancelling cheap: when the viewer moves it raises its epoch, and
  * everything the server had queued for an older epoch is dropped instead of sent. A client
  * that receives a unit from an old epoch can still use it - it is not wrong, only stale.
+ *
+ * It only ever counts up, for as long as the session lasts - opening a different image does
+ * not start it again. Three places read a lower epoch as an older view and throw its units
+ * away, so a counter that went back to zero would make every tile of the newly opened image
+ * look stale, and the screen would stay black.
  */
 public final class Wire {
 
