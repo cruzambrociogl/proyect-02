@@ -101,6 +101,8 @@ public final class SenderLink implements Link {
         out.put("truncated", sender.truncatedReports());
         out.put("receiverHolds", sender.heldByReceiver());
         out.put("symbols", sender.symbolsSent());
+        out.put("deliveredSymbols", sender.deliveredSymbols());
+        out.put("deliveredNeeded", sender.deliveredNeeded());
         out.put("unitsDelivered", sender.unitsDelivered());
         out.put("unitsDropped", sender.unitsDropped());
         return out;

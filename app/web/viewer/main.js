@@ -6,7 +6,7 @@
 
 import { Connection } from './net.js';
 import { Scene } from './scene.js';
-import { Panel, human, zoomLabel } from './panel.js';
+import { Panel, count, human, zoomLabel } from './panel.js';
 import { rendererFor } from './renderers.js';
 
 const VIEW_INTERVAL_MS = 60;        // at most this often while the view keeps changing
@@ -42,6 +42,8 @@ let serverStats = {};
 let pathStats = {};
 let frames = 0, fps = 0, fpsSince = performance.now();
 const rateWindow = [];
+let lastUnitAt = 0;        // when a tile last arrived, so a stall can be named as one
+let tilesIn = 0;           // tiles, not messages: the session's own chatter is not a tile
 
 // ----------------------------------------------------------------- picking an image
 
@@ -86,8 +88,7 @@ function connect() {
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/link`;
   connection = new Connection(url, {
     onOpen: () => panel.set('link', 'connected'),
-    onClose: () => panel.set('link', 'disconnected'),
-    onWelcome: (w) => panel.set('method', w.method),
+    onClose: () => panel.set('link', 'disconnected', 'bad'),
     onFault: (text) => showError(text),
     onChart: (c) => {
       chart = c;
@@ -108,7 +109,9 @@ function connect() {
     },
     onUnit: async (unit) => {
       if (!chart || !scene.renderer) return;
-      rateWindow.push({ at: performance.now(), bytes: unit.wireBytes });
+      tilesIn++;
+      lastUnitAt = performance.now();
+      rateWindow.push({ at: lastUnitAt, bytes: unit.wireBytes });
       try {
         scene.put(unit.level, unit.x, unit.y, await scene.renderer.decode(unit.bytes));
         dirty = true;
@@ -285,75 +288,119 @@ $('change').onclick = () => { $('picker').hidden = false; showPicker(); };
 // ----------------------------------------------------------------- the loop
 
 function fillImageFacts() {
-  panel.set('name', chart.image);
-  panel.set('pixels', `${chart.width.toLocaleString()} × ${chart.height.toLocaleString()}`);
-  panel.set('megapixels', (chart.width * chart.height / 1e6).toFixed(1));
-  panel.set('method', chart.method);
-  panel.set('levels', `0 … ${chart.maxLevel}`);
-  panel.set('unit size', `${chart.unitSize} px, ratio ${chart.ratio}`);
-  panel.set('prepared', human(chart.bytes));
-  panel.set('units total', chart.units.toLocaleString());
+  panel.set('file', chart.image);
+  panel.set('size', `${chart.width.toLocaleString()} × ${chart.height.toLocaleString()} px`
+    + `  ·  ${(chart.width * chart.height / 1e6).toFixed(0)} Mpx`);
+  panel.set('method', chart.method === 'ladder-tiles'
+    ? `tiles of ${chart.unitSize} px, each level ${chart.ratio}× smaller`
+    : chart.method);
+  panel.set('prepared', `${count(chart.units)} units  ·  ${human(chart.bytes)} on the server`);
 }
 
+/**
+ * What the panel says, once every tenth of a second.
+ *
+ * The order is the order the questions come in: am I waiting, what is arriving, what is the
+ * path doing, what is this costing me. Rates are worked out over the last two seconds rather
+ * than reported as running totals, because "28 tiles a second" answers a question and
+ * "885 tiles" does not.
+ */
 function updatePanel() {
   if (!chart) return;
-  const r = scene.region();
+  const now = performance.now();
+  const region = scene.region();
   const wanted = scene.wanted();
-  const held = wanted.filter((k) => scene.has(k)).length;
+  const here = wanted.filter((key) => scene.has(key)).length;
+  const missing = wanted.length - here;
+
+  while (rateWindow.length && now - rateWindow[0].at > 2000) rateWindow.shift();
+  const seconds = 2;
+  const bytesPerSecond = rateWindow.reduce((sum, e) => sum + e.bytes, 0) / seconds;
+  const tilesPerSecond = rateWindow.length / seconds;
+  const quiet = now - lastUnitAt;
+
+  // ---------------------------------------------------------------- this view
+  panel.fill('tiles', wanted.length ? here / wanted.length : 1,
+    missing === 0 ? `all ${count(wanted.length)} tiles of this view are here`
+      : `${count(here)} of ${count(wanted.length)} tiles`,
+    missing === 0);
+
+  if (missing === 0) {
+    panel.set('status', 'complete', 'settled');
+  } else if (tilesPerSecond > 0) {
+    panel.set('status', `${count(missing)} still coming`, 'waiting');
+  } else if (quiet > 2500) {
+    panel.set('status', `${count(missing)} missing, nothing arriving for `
+      + `${(quiet / 1000).toFixed(0)} s`, 'bad');
+  } else {
+    panel.set('status', `${count(missing)} still coming`, 'waiting');
+  }
 
   panel.set('zoom', zoomLabel(scene.camera.scale));
-  panel.set('level', `${scene.level()} / ${chart.maxLevel}`);
-  panel.set('scale', `${scene.camera.scale.toFixed(3)} src px per screen px`);
-  panel.set('centre', `${Math.round(scene.camera.cx).toLocaleString()}, ${Math.round(scene.camera.cy).toLocaleString()}`);
-  panel.set('region', `${Math.round(r.w).toLocaleString()} × ${Math.round(r.h).toLocaleString()} px`);
-  const pct = (r.w * r.h) / (chart.width * chart.height) * 100;
-  panel.set('visible', pct >= 100 ? '100%' : pct < 0.01 ? `${pct.toFixed(4)}%` : `${pct.toFixed(2)}%`);
-  panel.set('units wanted', String(wanted.length));
-  panel.set('held', String(held));
-  panel.set('missing', String(wanted.length - held));
+  panel.set('detail', `${scene.level()} of ${chart.maxLevel}`
+    + (scene.level() === 0 ? ' (finest)' : ''));
+  // Clamped to the image: zoomed right out the view is wider than the picture, and saying so
+  // in pixels of image would be saying something untrue.
+  const seenW = Math.min(region.w, chart.width);
+  const seenH = Math.min(region.h, chart.height);
+  const share = (seenW * seenH) / (chart.width * chart.height) * 100;
+  panel.set('on screen', share >= 99.5 ? 'the whole image'
+    : `${count(seenW)} × ${count(seenH)} px, `
+      + `${share < 0.01 ? share.toFixed(4) : share.toFixed(2)}%`);
 
-  const now = performance.now();
-  while (rateWindow.length && now - rateWindow[0].at > 2000) rateWindow.shift();
-  const rate = rateWindow.reduce((sum, e) => sum + e.bytes, 0) / 2;
-  panel.set('views sent', viewsSent.toLocaleString());
-  panel.set('units in', String(connection?.messagesReceived ?? 0));
-  panel.set('bytes in', human(connection?.bytesReceived ?? 0));
-  panel.set('rate', `${human(rate)}/s`);
-  const units = serverStats.unitsSent ?? 0;
-  panel.set('average unit', units ? human((serverStats.bytesSent ?? 0) / units) : '–');
-  panel.set('server queue', String(serverStats.queued ?? 0));
-  panel.set('cancelled', String(serverStats.unitsCancelled ?? 0));
-  panel.set('epoch', String(epoch));
+  // ---------------------------------------------------------------- arriving
+  panel.set('now', tilesPerSecond
+    ? `${human(bytesPerSecond)}/s  ·  ${tilesPerSecond.toFixed(0)} tiles/s`
+    : 'nothing right now');
+  panel.set('this session', `${human(connection?.bytesReceived ?? 0)}  ·  ${count(tilesIn)} tiles`);
+  const sent = serverStats.unitsSent ?? 0;
+  panel.set('average tile', sent ? human((serverStats.bytesSent ?? 0) / sent) : '–');
 
-  // The protocol's own numbers: the sending side reports what it has measured about the
-  // path, the client half reports what it has seen arrive.
+  // ---------------------------------------------------------------- the path
   const mbit = (bits) => (bits == null ? '–' : `${(bits / 1e6).toFixed(1)} mbit/s`);
   const ms = (micros) => (micros == null ? '–' : `${(micros / 1000).toFixed(1)} ms`);
-  panel.set('send rate', mbit(serverStats.rate));
-  panel.set('round trip', ms(serverStats.rttMicros));
-  panel.set('queue', ms(serverStats.queueMicros));
-  panel.set('path floor', ms(serverStats.floorMicros));
-  panel.set('loss', serverStats.loss == null ? '–' : `${(serverStats.loss * 100).toFixed(1)}%`);
-  panel.set('symbols out', (serverStats.symbols ?? 0).toLocaleString());
-  panel.set('units delivered', String(serverStats.unitsDelivered ?? 0));
-  panel.set('units dropped', String(serverStats.unitsDropped ?? 0));
-  panel.set('packets in', (pathStats.packetsIn ?? 0).toLocaleString());
-  panel.set('symbols wasted', String(pathStats.symbolsWasted ?? 0));
-  panel.set('units rebuilt', String(pathStats.unitsRebuilt ?? 0));
-  panel.set('units part built', String(pathStats.unitsPartial ?? 0));
-  panel.set('stale', String(pathStats.unitsStale ?? 0));
+  panel.set('sending at', mbit(serverStats.rate));
+  panel.set('round trip', serverStats.rttMicros == null ? '–'
+    : `${ms(serverStats.rttMicros)} (floor ${ms(serverStats.floorMicros)})`);
+  const queueMs = (serverStats.queueMicros ?? 0) / 1000;
+  panel.set('queue', ms(serverStats.queueMicros), queueMs > 100 ? 'bad'
+    : queueMs > 25 ? 'waiting' : null);
+  const loss = serverStats.loss ?? 0;
+  panel.set('loss', `${(loss * 100).toFixed(1)}%`, loss > 0.15 ? 'bad' : null);
 
-  panel.set('units held', String(scene.units.size));
-  panel.set('held bytes', human(scene.heldBytes));
-  panel.set('budget', human(scene.budget));
-  panel.set('evicted', String(scene.evictions));
-  panel.set('unreported drops', String(scene.dropped.length));
+  // What the repair actually cost, against what the same messages would have needed on a
+  // path that lost nothing - the server counts both, so padding and the session's own
+  // messages are on the same side of the comparison instead of inflating it.
+  const symbols = serverStats.deliveredSymbols ?? 0;
+  const needed = serverStats.deliveredNeeded ?? 0;
+  panel.set('repair', needed > 0
+    ? `${Math.max(0, (symbols / needed - 1) * 100).toFixed(0)}% extra symbols` : '–');
+  panel.set('cancelled', `${count(serverStats.unitsCancelled ?? 0)} tiles`);
 
-  panel.set('units drawn', String(scene.lastDrawn));
-  panel.set('splats drawn', scene.renderer?.splatsDrawn != null
-    ? scene.renderer.splatsDrawn.toLocaleString() : '–');
-  panel.set('draw time', `${scene.lastDrawMs.toFixed(1)} ms`);
-  panel.set('frames', `${fps} fps`);
+  // ---------------------------------------------------------------- memory here
+  panel.fill('cache', scene.heldBytes / scene.budget,
+    `${human(scene.heldBytes)} of ${human(scene.budget)} held`,
+    scene.heldBytes < scene.budget * 0.9);
+  panel.set('holding', `${count(scene.units.size)} tiles  ·  ${human(scene.heldBytes)}`);
+  panel.set('dropped', `${count(scene.evictions)} tiles`
+    + (scene.dropped.length ? `  ·  ${count(scene.dropped.length)} not yet reported` : ''));
+  panel.set('drawing', `${count(scene.lastDrawn)} tiles, `
+    + `${scene.lastDrawMs.toFixed(1)} ms, ${fps} fps`);
+
+  // ---------------------------------------------------------------- the fold
+  panel.set('link', connection?.ready ? 'connected' : 'disconnected',
+    connection?.ready ? null : 'bad');
+  panel.set('epoch', count(epoch));
+  panel.set('views sent', count(viewsSent));
+  panel.set('server queue', count(serverStats.queued ?? 0));
+  panel.set('symbols out', count(serverStats.symbols ?? 0));
+  panel.set('packets in', count(pathStats.packetsIn ?? 0));
+  panel.set('tiles rebuilt', count(pathStats.unitsRebuilt ?? 0));
+  panel.set('part built', count(pathStats.unitsPartial ?? 0));
+  panel.set('wasted', count(pathStats.symbolsWasted ?? 0));
+  panel.set('discarded', count(pathStats.unitsStale ?? 0));
+  panel.set('splats drawn', scene.renderer?.splatsDrawn == null ? '–'
+    : count(scene.renderer.splatsDrawn));
 }
 
 function frame() {

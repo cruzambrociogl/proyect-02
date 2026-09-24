@@ -73,6 +73,10 @@ public final class Sender {
     private long lastFillNanos = System.nanoTime();
 
     private long unitsOffered, unitsDelivered, unitsDropped, symbolsSent, bytesSent;
+    // The yardstick the repair is measured against, and only over messages that actually
+    // arrived: counting what was offered would fold in every unit the viewer moved away from,
+    // which was cancelled rather than repaired and shows up in its own count.
+    private long deliveredSymbols, deliveredNeeded;
     private final java.util.ArrayDeque<Long> recentlySent = new java.util.ArrayDeque<>();
     private long lastReportNanos, lastReceived, lastSymbolsSent;
     private boolean starved;                          // the queue of work ran dry since the last measure
@@ -126,6 +130,11 @@ public final class Sender {
 
     public long symbolsSent() { return symbolsSent; }
 
+    /** Symbols spent on messages that arrived, and what they would have cost with no loss. */
+    public long deliveredSymbols() { return deliveredSymbols; }
+
+    public long deliveredNeeded() { return deliveredNeeded; }
+
     public long bytesSent() { return bytesSent; }
 
     public boolean truncatedReports() { return lastTruncated; }
@@ -178,9 +187,12 @@ public final class Sender {
             if (need.count() == 0) continue;        // named only so we keep it: nothing to send yet
             for (Outgoing unit : outgoing) {
                 if (unit.id == need.unit() && need.block() < unit.owed.length) {
-                    // one spare, plus the share the path is expected to swallow
+                    // What was asked for, plus enough to cover the share of *those* the path
+                    // is expected to swallow - at least one, so a single loss in the answer
+                    // does not cost another round trip. Adding a flat spare on top of that was
+                    // three symbols for every one asked for, and an image tile is only ten.
                     unit.owed[need.block()] = Math.max(unit.owed[need.block()],
-                            need.count() + 1 + (int) Math.ceil(need.count() * lossRate));
+                            need.count() + Math.max(1, (int) Math.ceil(need.count() * lossRate)));
                     unit.finishedAtNanos = 0;
                 }
             }
@@ -207,6 +219,8 @@ public final class Sender {
                     && after(report.echoMicros(), unit.lastSymbolMicros)) {
                 it.remove();
                 unitsDelivered++;
+                deliveredSymbols += unit.sent;
+                deliveredNeeded += p2.fec.Block.symbolCount(unit.message.length);
             }
         }
     }
@@ -240,6 +254,7 @@ public final class Sender {
             if (unit.sentEverything()) unit.finishedAtNanos = System.nanoTime();
             out.symbol(header, symbol);
 
+            unit.sent++;
             symbolsSent++;
             bytesSent += Packet.MAX_DATAGRAM;
             recentlySent.addLast(System.nanoTime());
@@ -380,6 +395,7 @@ public final class Sender {
         final int[] next;                              // the next symbol number per block
         final int[] owed;                              // symbols still to send per block
         int lastSymbolMicros;
+        int sent;                                      // symbols of this unit put on the wire
         long finishedAtNanos;                          // when the last planned symbol left
 
         Outgoing(int id, int epoch, Class klass, byte[] message, long deadlineNanos) {

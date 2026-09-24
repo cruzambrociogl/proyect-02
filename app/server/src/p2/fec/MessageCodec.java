@@ -31,11 +31,21 @@ public final class MessageCodec {
 
         public int symbolsIn(int block) { return Block.symbolsIn(message.length, block); }
 
-        /** How many symbols to send for a block to survive the loss rate we expect. */
+        /**
+         * How many symbols to send for a block to survive the loss rate we expect.
+         *
+         * Enough to replace what the path is expected to swallow, and one spare on top - but
+         * only where something is actually being lost. The spare buys one thing: it saves a
+         * round trip when a single packet goes missing. On a path losing nothing it buys
+         * nothing, and for the small blocks an image tile makes - a 12 KB tile is ten symbols
+         * - one spare is a tenth of the transfer. So a clean path pays exactly the message,
+         * and the margin appears when there is loss to cover.
+         */
         public int symbolsToSend(int block, double lossRate) {
             int k = symbolsIn(block);
-            int repair = (int) Math.ceil(k * lossRate / Math.max(0.05, 1 - lossRate)) + 1;
-            return k + repair;
+            if (lossRate <= 0.005) return k;
+            int repair = (int) Math.ceil(k * lossRate / Math.max(0.05, 1 - lossRate));
+            return k + repair + 1;
         }
 
         /**
