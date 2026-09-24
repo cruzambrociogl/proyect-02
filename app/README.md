@@ -3,12 +3,51 @@
 Java 21 and plain HTML/JS. No dependencies, no build tools, no external requests.
 
 ```sh
-./run.sh                             # serves ./images on http://localhost:8080
+./run.sh                             # builds, then serves ./images on http://localhost:8080
 ./run.sh --images ../ideas/images    # or any other folder of images
 ```
 
 - `http://localhost:8080/` — **server site**: what is served, add images, prepare them.
 - `http://localhost:8080/viewer` — **client site**: look at an image.
+- `http://localhost:8080/viewer?image=NAME&budget=24` — straight to an image, holding 24 MB.
+
+The image travels over our own protocol on UDP (port 8081 by default). The browser cannot
+speak that, so what it connects to is the client half of the protocol, which holds a socket of
+its own; see **The protocol** below.
+
+### Make the path misbehave
+
+On a loopback nothing is lost, delayed or reordered, which is the one condition under which
+none of the protocol's hard parts can be seen working. So the emulator is built in:
+
+```sh
+./run.sh --impair "loss=2%,delay=25ms,jitter=5ms,rate=30mbit,reorder=1%,duplicate=0.5%"
+```
+
+The viewer's panel then shows what it costs: the rate the sender settles on, the queue it
+leaves behind, the loss it measures and the repair symbols it spends.
+
+### Test it
+
+Each of these runs on its own and says what it measured:
+
+```sh
+java -cp server/build p2.fec.FecSelfTest        # the erasure code, on its own
+java -cp server/build p2.net.udp.UdpSelfTest    # one unit across a real socket, six paths
+java -cp server/build p2.net.udp.TransferSelfTest   # 200 units, cancellation, speculation
+java -cp server/build p2.net.udp.TransferSelfTest --trace   # and what the rate control did
+```
+
+### The figures
+
+```sh
+python3 tools/fig_pipeline.py --screen /tmp/viewer.png --out ../docs/pipeline.png
+python3 tools/fig_protocol.py --out ../docs/protocol.png
+python3 tools/fig_pipeline.py --lang es --out ../docs/pipeline-es.png   # and --lang es
+```
+
+Both are drawn from the real store and from numbers the code printed, so they go stale if the
+code changes and are meant to be regenerated rather than edited.
 
 ## The five parts
 
@@ -52,12 +91,24 @@ shared edge. `tools/verify_splats.py --block` measures this: error at unit borde
 no worse than inside them.
 
 **`Link`** (`net/Link.java`) — how bytes travel. It answers "can I send more", "take this
-message" and "we are done", and reports what arrives.
-Today: `WebSocketLink` (the browser bridge, over TCP).
-Next: our own protocol over UDP, with Selective Repeat, SACK and pluggable congestion
-control, which is the part the course is about.
+message" and "we are done", and reports what arrives. Two implementations:
+`WebSocketLink` (TCP, what the browser connects to) and `SenderLink`, which hands each
+message to our own protocol on UDP with a deadline and a class. The session layer above does
+not know which one is underneath.
 
-## The protocol messages
+## The protocol
+
+`net/udp/` — no TCP, no HTTP, no library. Loss is repaired by a systematic rateless erasure
+code over GF(256) instead of by asking for anything again; the receiver reports a *count* of
+symbols it is short of, never a list of what went missing; there is no acknowledgement
+anywhere, and a unit is finished when the receiver stops naming it. The rate is set by how
+long packets are waiting rather than by whether they are lost - the repair symbols absorb
+loss, which is exactly why loss is no longer a usable congestion signal.
+
+`docs/protocol.png` walks through all of it, with a worked example taken from running the
+codec on a real tile.
+
+### The messages
 
 A 12-byte header (`'P' '2' version type epoch length`) then a payload. The epoch is what
 makes cancelling cheap: the viewer raises it on every change of view, and the server drops
@@ -89,6 +140,6 @@ and WebSockets never connect), runs JavaScript in it and saves a screenshot.
 
 - [x] **1** — server skeleton, catalog, preparation with progress, server site
 - [x] **2** — viewer over the WebSocket bridge: streaming, drawing, memory budget, panel
-- [ ] **3** — the protocol over UDP: framing, Selective Repeat, SACK, RTO, NewReno,
-      an impairment layer, a Java bench client, CSV traces
-- [ ] **4** — CUBIC and Vegas behind a flag, compared on the same scripted session
+- [x] **3** — the protocol over UDP: framing, the erasure code, reports by count, deadline
+      scheduling, delay-based rate control, the impairment layer, and the viewer running on it
+- [ ] **4** — a bench client with CSV traces, and the protocol document
