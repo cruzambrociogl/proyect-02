@@ -18,7 +18,15 @@ import java.util.Map;
 public final class Routes implements HttpServer.Handler, HttpServer.Uploads {
 
     /** Accept sources up to this size; a gigapixel TIFF is comfortably under it. */
-    private static final long MAX_UPLOAD = 8L * 1024 * 1024 * 1024;
+    /**
+     * As big as anything anyone is going to look at. The images this is meant for run to
+     * ninety gigabytes, so the limit is not the interesting constraint - the disk is, and
+     * that is checked separately and said out loud.
+     */
+    private static final long MAX_UPLOAD = 128L * 1024 * 1024 * 1024;
+
+    /** Room to leave behind on the disk after an upload, so the machine still works. */
+    private static final long KEEP_FREE = 2L * 1024 * 1024 * 1024;
 
     private final Catalog catalog;
     private final Path webRoot;
@@ -89,6 +97,13 @@ public final class Routes implements HttpServer.Handler, HttpServer.Uploads {
         return Response.notFound(rest);
     }
 
+    /** Bytes as somebody would say them. */
+    private static String size(long bytes) {
+        if (bytes >= 1L << 30) return String.format("%.1f GB", bytes / (double) (1L << 30));
+        if (bytes >= 1L << 20) return String.format("%.0f MB", bytes / (double) (1L << 20));
+        return bytes + " bytes";
+    }
+
     // ---------------------------------------------------------------- uploads
 
     @Override
@@ -98,7 +113,20 @@ public final class Routes implements HttpServer.Handler, HttpServer.Uploads {
         if (name == null || name.isBlank() || name.contains("/") || name.contains("\\")) {
             throw new IOException("upload needs a ?name= with no path separators");
         }
-        if (request.contentLength() > MAX_UPLOAD) throw new IOException("upload too large");
+        if (request.contentLength() > MAX_UPLOAD) {
+            throw new IOException(String.format("upload of %s is beyond the %s limit",
+                    size(request.contentLength()), size(MAX_UPLOAD)));
+        }
+
+        // Refuse before writing rather than fill the disk and fail in the middle: a partly
+        // written file of this size is minutes wasted and a machine with nothing left on it.
+        long free = Files.getFileStore(catalog.root()).getUsableSpace();
+        if (request.contentLength() + KEEP_FREE > free) {
+            throw new IOException(String.format(
+                    "not enough room: %s needs %s and the disk has %s free. Put the file in %s "
+                    + "directly, or start the server with --images pointing at another disk",
+                    name, size(request.contentLength()), size(free), catalog.root()));
+        }
 
         Path target = catalog.root().resolve(name);
         Path partial = catalog.root().resolve(name + ".uploading");
