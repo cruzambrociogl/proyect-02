@@ -5,6 +5,15 @@ Java 21 and plain HTML/JS. No dependencies, no build tools, no external requests
 ```sh
 ./run.sh                             # builds, then serves ./images on http://localhost:8080
 ./run.sh --images ../ideas/images    # or any other folder of images
+run.cmd                              # the same thing on Windows
+```
+
+Java 21 is the only thing that has to be installed. Both scripts are the same two commands -
+`javac` then `java` - so if neither runs, those two commands do:
+
+```sh
+javac -d server/build -sourcepath server/src server/src/p2/Main.java
+java -cp server/build p2.Main --web web --images images
 ```
 
 - `http://localhost:8080/` — **server site**: what is served, add images, prepare them.
@@ -77,6 +86,7 @@ renderer in `web/viewer/renderers.js`.
 
 ```sh
 ./run.sh --method splats-4000 --python /path/to/python3   # needs torch + numpy + Pillow
+run.cmd --method splats-4000 --python python              # on Windows, usually "python"
 ```
 
 Splat preparation runs in two stages: the image is rasterised into tiles (the fitter needs
