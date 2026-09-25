@@ -308,6 +308,7 @@ export class ClientLink {
         break;
       }
       case Type.FAULT:
+        this.pendingOpen = null;                              // an answer too: stop asking
         this.events.fault?.(m.payload.toString("utf8"));
         break;
       case Type.CONFETTI:

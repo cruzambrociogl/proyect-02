@@ -533,10 +533,12 @@ function frame(): void {
   };
   visit(c.maxLevel, 0, 0);
 
-  if (finest < c.split && ui.tiles) {
+  if (ui.tiles) {
     const X0 = cam.cx - cw / 2 / cam.z, Y0 = cam.cy - ch / 2 / cam.z;
     const X1 = cam.cx + cw / 2 / cam.z, Y1 = cam.cy + ch / 2 / cam.z;
-    for (let L = c.split - 1; L >= finest; L--) {
+    // tiles of every level, coarsest first so finer ones land on top; the splats underneath
+    // fill whatever no tile covers yet
+    for (let L = c.maxLevel; L >= finest; L--) {
       const span = T * 2 ** L, [gc, gr] = gridOf(L);
       for (let y = Math.max(0, Math.floor(Y0 / span)); y <= Math.min(gr - 1, Math.floor(Y1 / span)); y++) {
         for (let x = Math.max(0, Math.floor(X0 / span)); x <= Math.min(gc - 1, Math.floor(X1 / span)); x++) {
@@ -629,7 +631,7 @@ function frame(): void {
     `image      ${c.name} ${c.width} x ${c.height}\n` +
     `link       ${linkState}\n` +
     `level      ${deepest} drawn / ${finest} wanted (top ${c.maxLevel})\n` +
-    `layers     splats ${c.maxLevel}..${c.split}` + (c.split > 0 ? `, tiles ${c.split - 1}..0` : "") + `\n` +
+    `layers     splats ${c.maxLevel}..${c.split} first, tiles ${c.maxLevel}..0 at rest\n` +
     `units      ${base.length + detail.length} drawn, ${units.size} held, ${partial} partial\n` +
     `blobs      ${(drawnBlobs / 1e3).toFixed(0)}k drawn, ${(blobBytes / RECORD / 1e3).toFixed(0)}k held\n` +
     `tiles      ${tileList.length} drawn, ${tiles.size} held\n` +

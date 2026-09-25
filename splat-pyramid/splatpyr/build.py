@@ -274,7 +274,9 @@ def build(root, finest=0, workers=None, split=None, splat_units=SPLAT_UNITS, log
             log(f"level {level}: {len(jobs)} units ({totals['fitted']} fitted, "
                 f"{totals['empty']} empty), {totals['blobs']} blobs, "
                 f"{totals['bytes'] / 1024:.0f} KB, {psnr}, {time.time() - t0:.1f}s")
-        for level in range(split - 1, finest - 1, -1):
+        # image tiles for every level: what the viewer shows at rest (splats alone lost fine,
+        # low-contrast texture). Ingest normally cut them; missing ones come from the PNGs.
+        for level in range(pyr.max_level, finest - 1, -1):
             cols, rows = pyr.grid(level)
             jobs = [(level, x, y) for y in range(rows) for x in range(cols)]
             t0 = time.time()

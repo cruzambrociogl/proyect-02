@@ -45,7 +45,7 @@ async function refresh() {
         <div class="thumb" style="background-image:url('/thumb/${encodeURIComponent(i.name)}')"></div>
         <div class="info"><div class="name">${esc(i.name)}</div>
           <div class="meta">${i.width.toLocaleString()} × ${i.height.toLocaleString()} px · ${(i.width * i.height / 1e6).toFixed(0)} Mpx</div>
-          <div class="meta">${i.maxLevel + 1} levels · splats ${i.maxLevel}–${i.split}${i.split > 0 ? `, tiles ${i.split - 1}–0` : ""}</div></div>
+          <div class="meta">${i.maxLevel + 1} levels · splats ${i.maxLevel}–${i.split}, tiles at every level</div></div>
       </a>`).join("");
   } catch (e) {
     document.getElementById("note").textContent = `Cannot reach the server: ${e.message}`;

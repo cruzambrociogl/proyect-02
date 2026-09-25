@@ -6,9 +6,9 @@ Level 0 is the image at full size and every level above it is the one below halv
 level, max_level, is the first that fits in a single tile: it is the base the whole splat
 pyramid is built on.
 
-Levels from `split` up are fitted as splats, so they are kept lossless, as PNG tiles in
-pixels/L/x_y.png. Levels below the split are never fitted: they go straight to the image
-tiles the viewer draws, tiles/L/x_y.jpg or .webp, and get no PNG at all. The split is decided
+Every level is cut into the image tiles the viewer shows at rest, tiles/L/x_y.jpg or .webp.
+Levels from `split` up are also fitted as splats, the layer that arrives first and fills the
+screen while tiles load, so they are kept lossless too, as PNG in pixels/L/x_y.png. The split is decided
 here (at most SPLAT_UNITS fitted units by default) and recorded in pyramid.json.
 
 Tile format, per tile ("auto"): each tile is encoded as JPEG and as lossless WebP, and the
@@ -137,14 +137,21 @@ def ingest(image_path, root, tile=256, split=None, splat_units=SPLAT_UNITS,
     return meta
 
 
-def _write_levels(im, root, tile, first, last, split, quality, tile_format, log):
-    """Write levels first..last (inclusive, upwards) starting from `im` at level `first`:
-    PNG for levels at or above the split, image tiles below it."""
+def _write_levels(im, root, tile, first, last, split, quality, tile_format, log, tiles_below=10**9):
+    """Write levels first..last (inclusive, upwards) starting from `im` at level `first`: image
+    tiles for every level (what the viewer shows at rest), and PNG too for the levels at or
+    above the split (what the splats are fitted to). `tiles_below` limits the tiles to the
+    levels below it, when another pass already cut the others."""
     for level in range(first, last + 1):
         w, h = im.size
         lossless = level >= split
-        folder = os.path.join(root, "pixels" if lossless else "tiles", str(level))
-        os.makedirs(folder, exist_ok=True)
+        tiles_too = level < tiles_below
+        pixels = os.path.join(root, "pixels", str(level))
+        folder = os.path.join(root, "tiles", str(level))
+        if lossless:
+            os.makedirs(pixels, exist_ok=True)
+        if tiles_too:
+            os.makedirs(folder, exist_ok=True)
         cols, rows = math.ceil(w / tile), math.ceil(h / tile)
         kept = {}
         for y in range(rows):
@@ -152,13 +159,13 @@ def _write_levels(im, root, tile, first, last, split, quality, tile_format, log)
                 box = (x * tile, y * tile, min(w, (x + 1) * tile), min(h, (y + 1) * tile))
                 part = im.crop(box)
                 if lossless:
-                    part.save(os.path.join(folder, f"{x}_{y}.png"), compress_level=1)
-                else:
+                    part.save(os.path.join(pixels, f"{x}_{y}.png"), compress_level=1)
+                if tiles_too:
                     ext, data = encode_tile(part, tile_format, quality)
                     with open(os.path.join(folder, f"{x}_{y}.{ext}"), "wb") as f:
                         f.write(data)
                     kept[ext] = kept.get(ext, 0) + 1
-        kinds = "PNG" if lossless else ", ".join(f"{n} {e}" for e, n in sorted(kept.items()))
+        kinds = ", ".join(([f"PNG"] if lossless else []) + [f"{n} {e}" for e, n in sorted(kept.items())])
         log(f"  level {level}: {w}x{h}, {cols * rows} tiles ({kinds})")
         if level < last:
             im = _halve(im)
@@ -198,7 +205,7 @@ def _ingest_vips(image_path, root, tile, top, split, quality, tile_format, log):
             levels = sorted(int(d) for d in os.listdir(work + "_files") if d.isdigit())
             runs[ext] = (work, levels[-1])     # DeepZoom counts up from 1 px to full size
             log(f"  {ext} pass in {time.time() - t0:.0f}s")
-        for level in range(split):
+        for level in range(top + 1):              # every level: tiles are the view at rest
             dest = os.path.join(root, "tiles", str(level))
             shutil.rmtree(dest, ignore_errors=True)
             os.makedirs(dest)
@@ -230,7 +237,9 @@ def _ingest_vips(image_path, root, tile, top, split, quality, tile_format, log):
         img = img.shrink(f, f)
     arr = np.ndarray(buffer=img.write_to_memory(), dtype=np.uint8,
                      shape=(img.height, img.width, img.bands))
-    _write_levels(Image.fromarray(arr), root, tile, split, top, split, quality, tile_format, log)
+    # the tiles of every level came from the first pass: only the PNGs here
+    _write_levels(Image.fromarray(arr), root, tile, split, top, split, quality, tile_format, log,
+                  tiles_below=0 if split > 0 else 10**9)
     log(f"  PNG levels in {time.time() - t0:.0f}s")
 
 

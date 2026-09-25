@@ -193,7 +193,7 @@ export class Session {
         this.send(encode(Type.WELCOME, 0));
         break;
       case Type.OPEN: {
-        const name = m.payload.toString("utf8");
+        const name = m.payload.toString("utf8").normalize("NFC");
         const image = this.images.get(name);
         if (!image) {
           this.send(encode(Type.FAULT, m.epoch, Buffer.from(

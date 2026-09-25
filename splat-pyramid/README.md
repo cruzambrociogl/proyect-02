@@ -85,6 +85,17 @@ Following [PLAN.md](PLAN.md):
    count says it is short, whichever packets were lost. Repair traffic on the home link fell
    from 0.34 MB to 0.03 MB per session. `npm test` checks the code on its own.
 
+7. Tiles at every level. Splats alone lost fine, low-contrast texture when zoomed out (the
+   big Holbein's carpet, fur and wall came out smooth): the fitter judges by average error,
+   and texture barely moves an average (an empty level-4 unit still scored 32 dB while
+   keeping 24% of the original's pixel-to-pixel detail). Now every level is also cut into
+   image tiles, and the view at rest is always the tiles; the splats are the layer that
+   arrives first (the most important chunk of every unit goes before any tile), fills the
+   screen while tiles load, and survives loss. For the big Holbein the coarse levels 7-3
+   add 272 tiles, 3.1 MB; its zoomed-out view takes 2.27 MB to arrive in full.
+   `splatpyr build` adds the missing tile levels to images prepared before this, without
+   fitting again.
+
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 

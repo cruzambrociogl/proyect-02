@@ -74,9 +74,11 @@ export class PreparedImage {
   /**
    * The units a view needs, most important first. The same rule the viewer draws by:
    * splat units from the top level down to the level the zoom wants (never below the
-   * split), each only under a unit of the level above; then, if the zoom wants a level
-   * below the split, that level's image tiles. Splats come first (coarse to fine) because
-   * they are the placeholder the tiles land on; within a level, nearest the centre first.
+   * split), each only under a unit of the level above; then the image tiles of the level the
+   * zoom wants, at every level (splats alone lose fine, low-contrast texture, so the view at
+   * rest is always the tiles). Splats come first (coarse to fine) because they are what
+   * arrives first and fills the screen while the tiles land; within a level, nearest the
+   * centre first.
    */
   unitsFor(v: View): UnitId[] {
     const c = this.chart, T = c.tile;
@@ -108,7 +110,7 @@ export class PreparedImage {
     for (const level of [...byLevel.keys()].sort((a, b) => b - a)) {
       out.push(...byLevel.get(level)!.sort((a, b) => distance(level, a.x, a.y) - distance(level, b.x, b.y)));
     }
-    if (finest < c.split) {
+    {
       const span = T * 2 ** finest, [cols, rows] = this.grid(finest);
       const tiles: UnitId[] = [];
       for (let y = Math.max(0, Math.floor(Y0 / span)); y <= Math.min(rows - 1, Math.floor(Y1 / span)); y++) {
@@ -143,8 +145,11 @@ export function findImages(root: string, into = new Map<string, PreparedImage>()
   for (const name of existsSync(root) ? readdirSync(root) : []) {
     const dir = join(root, name);
     if (!isReady(dir)) continue;
-    seen.add(name);
-    if (!into.has(name)) into.set(name, new PreparedImage(dir, name));
+    // names are compared in NFC: macOS keeps file names decomposed ("u" + combining mark),
+    // an address typed or shared usually has the composed "ü"; both must find the image
+    const key = name.normalize("NFC");
+    seen.add(key);
+    if (!into.has(key)) into.set(key, new PreparedImage(dir, key));
   }
   for (const name of [...into.keys()]) if (!seen.has(name)) into.delete(name);
   return into;
