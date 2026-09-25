@@ -3,3 +3,4 @@ viewer/dist/
 data/
 __pycache__/
 *.pyc
+bench/out/

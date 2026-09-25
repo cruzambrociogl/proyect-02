@@ -350,6 +350,22 @@ function fit(): void {
   if (q.has("z")) cam.z = Number(q.get("z")) * (window.devicePixelRatio || 1);
   if (q.has("x")) cam.cx = Number(q.get("x"));
   if (q.has("y")) cam.cy = Number(q.get("y"));
+  clamp();
+}
+
+/**
+ * Keep the camera on the image (the same rule as v1): zoom between 4x past 1:1 and the whole
+ * image, and the centre where the image covers the screen, or centred on an axis where the
+ * image is smaller than the screen. Nobody wants to pan into empty space.
+ */
+function clamp(): void {
+  if (!M) return;
+  const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
+  const scale = Math.min(Math.max(1 / cam.z, 0.25), maxScale);
+  cam.z = 1 / scale;
+  const halfW = (canvas.width * scale) / 2, halfH = (canvas.height * scale) / 2;
+  cam.cx = halfW * 2 >= M.width ? M.width / 2 : Math.min(Math.max(cam.cx, halfW), M.width - halfW);
+  cam.cy = halfH * 2 >= M.height ? M.height / 2 : Math.min(Math.max(cam.cy, halfH), M.height - halfH);
 }
 
 const toScreen = (X: number, Y: number): [number, number] =>
@@ -517,10 +533,12 @@ function zoomAt(px: number, py: number, factor: number): void {
   const dpr = window.devicePixelRatio || 1;
   const sx = px * dpr, sy = py * dpr;
   const X = (sx - canvas.width / 2) / cam.z + cam.cx, Y = (sy - canvas.height / 2) / cam.z + cam.cy;
-  const minZ = 0.25 * Math.min(canvas.width / M.width, canvas.height / M.height);
-  cam.z = Math.min(16, Math.max(minZ, cam.z * factor));
+  cam.z *= factor;
+  const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
+  cam.z = Math.min(4, Math.max(1 / maxScale, cam.z));
   cam.cx = X - (sx - canvas.width / 2) / cam.z;
   cam.cy = Y - (sy - canvas.height / 2) / cam.z;
+  clamp();
   dirty = true;
 }
 
@@ -544,6 +562,7 @@ canvas.addEventListener("pointermove", (e) => {
   if (pointers.size === 1) {
     cam.cx -= ((e.offsetX - prev[0]) * dpr) / cam.z;
     cam.cy -= ((e.offsetY - prev[1]) * dpr) / cam.z;
+    clamp();
     dirty = true;
   } else if (pointers.size === 2) {
     const [a, b] = [...pointers.values()];
@@ -572,3 +591,12 @@ for (const id of ["detail", "tiles", "exact"] as const) {
 }
 
 requestAnimationFrame(frame);
+
+// A handle for measuring from outside (bench/versus.ts), like v1's globalThis.p2: what the
+// viewer holds. Nothing in the viewer itself uses it.
+(globalThis as unknown as { splat: unknown }).splat = {
+  held: () => ({ units: units.size + tiles.size, bytes: cache?.held ?? 0, budget: MEMORY_BUDGET,
+                 evicted: cache?.evictions ?? 0 }),
+  // the camera as v1 reports it: centre in image px, image px per canvas px
+  camera: () => ({ cx: cam.cx, cy: cam.cy, scale: 1 / cam.z }),
+};

@@ -109,3 +109,49 @@ reordered one no longer leaves the viewer waiting.
    level from 1.68 image pixels per screen pixel on instead of 2 (at most 1.19x
    magnification), so a frame never holds more than 2.8x the screen's pixels instead of 4x.
    Together they took the simulated peak from 51.5 MB to 31.5 MB.
+
+## v2 against v1
+
+`bench/versus.ts` runs both versions in the same headless Chrome with the same synthetic input
+(open holbein_8000.jpg, 7011 x 8000; wheel-zoom to 1:1; zig-zag with drags; wheel back out),
+over the same emulated link (applied on the server's side, as v1 does it). v2's window is the
+size of v1's canvas and both clamp the camera the same way, so both show exactly the same
+part of the image at every moment. `bench/versus_quality.py` scores screenshots of the canvas,
+taken 0.5, 2 and 5 s after each phase, against the original cropped to the camera the viewer
+reports. Medians of 3 runs each; links: lan 100 Mbit/s 1 ms, home 20 Mbit/s 30 ms 0.5% loss,
+mobile 2 Mbit/s 120 ms 1% loss.
+
+What the user sees, PSNR against the original (dB):
+
+| link | version | open 0.5 s | open 2 s | 1:1 zoom 0.5 s | pan 0.5 s | whole image again 0.5 s |
+|---|---|---|---|---|---|---|
+| lan | v1 | **28.4** | 28.4 | 35.0 | 34.3 | 28.4 |
+| lan | v2 | 21.8 | **32.6** | 35.0 | 34.3 | **32.6** |
+| home | v1 | **28.4** | 28.4 | 35.0 | 34.3 | 28.4 |
+| home | v2 | 21.7 | **32.6** | 35.0 | 34.3 | **32.6** |
+| mobile | v1 | 15.1 | 28.4 | 28.7 | 29.1 | 28.4 |
+| mobile | v2 | **20.5** | **30.8** | **33.7** | **34.3** | **32.6** |
+
+At 1:1 both show the same exact pixels once loaded (35.0 and 34.3 dB are the JPEG tiles
+themselves). Zoomed out, v2's splats are 4.2 dB closer to the original than v1's tiles. On
+the mobile link v2 is ahead at every moment: half a second after zooming in it shows 33.7 dB
+where v1 shows 28.7, and after the pan 34.3 against 29.1. Its weak spot is the first half
+second on fast links: the rate controller starts at 1 Mbit/s and has to climb.
+
+The browser's side:
+
+| link | version | received MB | messages sent | peak memory held | JS heap |
+|---|---|---|---|---|---|
+| lan | v1 | 8.27 | 57 | 50.0 MB | 1.1 MB |
+| lan | v2 | **3.29** | 55 | **31.9 MB** | 2.4 MB |
+| home | v1 | **2.62** | 57 | 47.4 MB | 1.1 MB |
+| home | v2 | 3.20 | 57 | **31.9 MB** | 2.2 MB |
+| mobile | v1 | 0.59 | 57 | 13.0 MB | 1.4 MB |
+| mobile | v2 | 1.60 | 54 | 24.5 MB | 1.7 MB |
+
+On the fast link v2 receives 60% less for the same session. On the slower links v2 receives
+more because it gets more through: that is the quality lead in the first table. Memory stays
+under v2's 32 MB budget against v1's 50. Both send about the same number of messages (one per
+view change). None of these 18 runs failed to load; v1 is known to show a black page now and
+then until reloaded, which the scorer counts separately when it happens.
+
