@@ -16,14 +16,22 @@ const KIND_SPLAT = 0, KIND_TILE = 1;
 const RECORD = 11, CONFETTI_HEAD = 29;          // must match shared/units.ts
 
 /**
- * The canvas is drawn at CSS pixels, one per layout pixel whatever the screen's density, and
- * the browser scales it up on a high-density (Retina) screen. Drawn at device pixels, a 2x
- * screen took 4x everything: the two full-screen half-float targets alone were 93 MB of GPU
- * memory at 3438 x 1690, and one screenful of tiles could need about 65 MB, more than the
- * whole cache budget, so the cache evicted what the next frame needed and fetched it again
- * (104 MB received for an 8 MB image). The cost: on such a screen, 1:1 is 2x magnified.
+ * How many canvas pixels per CSS pixel: the screen's own density, but at most 2 and at most
+ * what keeps the canvas under CANVAS_PIXELS, never below 1. Everything scales with the
+ * canvas's pixel count: the two full-screen half-float targets (8 bytes a pixel each) and the
+ * tiles one screenful needs. At device pixels a 2x laptop screen (3438 x 1690) took 93 MB for
+ * the targets alone, and a screenful of tiles could outgrow the whole 32 MB cache, which then
+ * evicted what the next frame needed and fetched it again (104.8 MB received in a test). At 1x
+ * a 3x phone looked soft, stretched 3x by the browser. The budget gives a phone 2x (its
+ * screen is small) and a large screen about 1x.
  */
-const PIXEL_RATIO = 1;
+const CANVAS_PIXELS = 2_000_000;
+function pixelRatio(): number {
+  const css = Math.max(1, canvas.clientWidth * canvas.clientHeight);
+  return Math.max(1, Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(CANVAS_PIXELS / css)));
+}
+/** The ratio the canvas actually has now (input positions and camera use this). */
+const canvasRatio = () => (canvas.clientWidth ? canvas.width / canvas.clientWidth : 1);
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
  * Everything the viewer holds, blobs and tiles together: the sandpile cache (sandpile.ts)
@@ -357,7 +365,7 @@ function fit(): void {
   cam.cx = M.width / 2;
   cam.cy = M.height / 2;
   const q = new URLSearchParams(location.hash.slice(1));
-  if (q.has("z")) cam.z = Number(q.get("z")) * PIXEL_RATIO;
+  if (q.has("z")) cam.z = Number(q.get("z")) * canvasRatio();
   if (q.has("x")) cam.cx = Number(q.get("x"));
   if (q.has("y")) cam.cy = Number(q.get("y"));
   clamp();
@@ -393,10 +401,14 @@ function gridOf(L: number): [number, number] {
 
 function frame(): void {
   requestAnimationFrame(frame);
-  const cw = Math.round(canvas.clientWidth * PIXEL_RATIO), ch = Math.round(canvas.clientHeight * PIXEL_RATIO);
+  const ratio = pixelRatio();
+  const cw = Math.round(canvas.clientWidth * ratio), ch = Math.round(canvas.clientHeight * ratio);
   if (canvas.width !== cw || canvas.height !== ch) {
+    // the camera's zoom is in canvas pixels: keep the same view if the ratio changed
+    const before = canvasRatio();
     canvas.width = cw;
     canvas.height = ch;
+    if (M && !needFit) cam.z *= canvasRatio() / before;
     dirty = true;
   }
   if (!M) { statsEl.textContent = linkState; return; }
@@ -539,7 +551,7 @@ function frame(): void {
 
 function zoomAt(px: number, py: number, factor: number): void {
   if (!M) return;
-  const sx = px * PIXEL_RATIO, sy = py * PIXEL_RATIO;
+  const sx = px * canvasRatio(), sy = py * canvasRatio();
   const X = (sx - canvas.width / 2) / cam.z + cam.cx, Y = (sy - canvas.height / 2) / cam.z + cam.cy;
   cam.z *= factor;
   const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
@@ -566,7 +578,7 @@ canvas.addEventListener("pointermove", (e) => {
   const prev = pointers.get(e.pointerId);
   if (!prev) return;
   pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
-  const dpr = PIXEL_RATIO;
+  const dpr = canvasRatio();
   if (pointers.size === 1) {
     cam.cx -= ((e.offsetX - prev[0]) * dpr) / cam.z;
     cam.cy -= ((e.offsetY - prev[1]) * dpr) / cam.z;

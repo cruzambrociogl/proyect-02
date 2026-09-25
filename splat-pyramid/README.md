@@ -120,7 +120,10 @@ reordered one no longer leaves the viewer waiting.
    and 31.9 MB through 643 evictions. (The two full-screen half-float targets the viewer
    composes into are on top, constant: about 11 MB each at 1600 x 900.)
 
-   The canvas is drawn at CSS pixels and the browser scales it up on a high-density screen.
+   The canvas has a pixel budget: the screen's own density, at most 2x and at most what keeps
+   it under 2 megapixels (a phone gets 2x, a large laptop screen about 1.2x); the browser
+   scales it up the rest of the way. Before this it was drawn at CSS pixels, which left a
+   3x phone soft (stretched 3x), and before that at device pixels:
    Drawn at device pixels, a 2x (Retina) screen took 4x everything: the two targets were
    93 MB of GPU memory at 3438 x 1690, and one screenful of tiles could need more than the
    whole budget, so the cache evicted what the next frame needed and fetched it again (a
