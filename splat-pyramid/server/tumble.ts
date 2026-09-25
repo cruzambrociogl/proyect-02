@@ -27,7 +27,7 @@
 // run is large): the rate steps back and the controller carries on with small steps.
 //
 // Every change is judged only once its effect can be seen: one round trip plus two reports
-// later, and over at least MIN_JUDGE_PACKETS delivered packets (one report alone, or a few
+// later (one report during a long run), and over at least MIN_JUDGE_PACKETS delivered packets (one report alone, or a few
 // dozen packets on a slow link, is too noisy: one burst of loss outweighs a 5% step). Queueing delay is the one-way delay minus the smallest seen in the last 10 s, so the
 // two machines' clocks never need to agree. A queue past Q_MAX forces a cut, at most once
 // per round trip.
@@ -169,7 +169,9 @@ export class RunAndTumble {
   private change(factor: number, now: number): void {
     this.rate = Math.min(this.max, Math.max(RATE_MIN, this.rate * factor));
     if (factor < 1 && this.dir > 0) this.dir = -1;
-    this.judgeAfter = now + this.srtt + 2 * REPORT_MS;
+    // a long run is judged after one report (a queue forming ends it on any report anyway);
+    // small steps after two, since one report is too noisy to judge 5%
+    this.judgeAfter = now + this.srtt + (this.firstRun ? 1 : 2) * REPORT_MS;
     this.resetWindow();
   }
 

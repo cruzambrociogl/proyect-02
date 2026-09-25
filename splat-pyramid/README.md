@@ -53,22 +53,21 @@ Following [PLAN.md](PLAN.md):
    count per unit comes back, repairs use idle capacity; the base unit is always repaired
    first. The most important chunk of every unit goes first. Detail levels are fitted
    loss-aware: at 1% loss the drawn image loses 0.4 dB instead of 3.1.
-3. Run-and-tumble: working. Medians of 7 runs (jump) and 5 (dive), time until sharp against
-   the best fixed rate picked by hand for each link:
+3. Run-and-tumble: working. Medians of 7 runs (jump) and 5 (dive), time until sharp:
 
-   | session / link | run-and-tumble (worst run) | best fixed rate (worst run) |
+   | session / link | run-and-tumble (worst run) | best fixed rate, picked by hand per link |
    |---|---|---|
-   | jump / LAN | 0.24 s (0.25) | 0.10 s |
-   | jump / home | 0.61 s (0.63) | 0.59 s (0.65) |
-   | jump / mobile | 4.56 s (4.85) | 3.61 s (4.06) |
-   | dive / LAN | 0.74 s | 0.02 s |
-   | dive / home | 1.06 s | 0.24 s |
-   | dive / mobile | 3.36 s | 2.86 s |
+   | jump / LAN | 0.18 s (0.18) | 0.10 s |
+   | jump / home | 0.53 s (0.57) | 0.59 s (0.65) |
+   | jump / mobile | 5.28 s (5.82) | 3.61 s (4.06) |
+   | dive / LAN | 0.41 s (0.41) | 0.02 s |
+   | dive / home | 0.73 s (0.86) | 0.24 s |
+   | dive / mobile | 3.06 s (3.63) | 2.86 s |
 
-   It finds each link's rate on its own (on mobile it settles at the link's 2 Mbit/s). Known
-   weak spots: it does not grow while the viewer is between views, so a zoom that ends with
-   a big view starts from the rate reached mid-zoom; and the climb from 1 Mbit/s costs about
-   a second on the mobile link's 240 ms round trip.
+   It finds each link's rate on its own (on mobile it settles at the link's 2 Mbit/s) and
+   beats the hand-picked rate on the home link. Known weak spots: the long first run
+   overshoots before the queue shows (about 200 queue drops a session on home and mobile,
+   repaired by the erasure code), and it does not grow while the viewer is between views.
 4. Erasure code (plan step 7, brought forward): done. Every block of a unit (a splat chunk,
    or up to 64 tile parts) is repaired with fresh symbols, exactly as many as the client's
    count says it is short, whichever packets were lost. Repair traffic on the home link fell
@@ -77,4 +76,4 @@ Following [PLAN.md](PLAN.md):
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 
-Next: the sandpile cache (memory), then Apollonius (2-3 users).
+Next: Apollonius (2-3 users), then the sandpile cache (memory).
