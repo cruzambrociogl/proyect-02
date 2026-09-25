@@ -131,6 +131,13 @@ reordered one no longer leaves the viewer waiting.
    on an emulated 2x screen received 8.5 MB with 325 evictions, and the targets take 23 MB.
    The cost: on such a screen 1:1 is 2x magnified (drawn pixelated when "exact pixels" is on).
 
+   Behind the sandpile there is a second level: what it evicts from the GPU is kept in
+   memory as it arrived (tile files, splat records: 10-40x smaller than decoded), under a
+   48 MB budget, and rebuilt from there when a view needs it again; only what leaves this
+   level too is reported to the server. Zooming into the same four spots of bills.jpg twice
+   on an emulated 2x laptop screen: 6.41 MB received in the first round, nothing in the
+   second, although the GPU level evicted 925 units along the way.
+
    Also cut: blobs are held on the GPU as their raw 11-byte records, decoded in the vertex
    shader, instead of 32 bytes of floats; tiles have no mipmaps; and a view draws the coarser
    level from 1.68 image pixels per screen pixel on instead of 2 (at most 1.19x

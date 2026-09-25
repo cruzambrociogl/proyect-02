@@ -39,15 +39,28 @@ const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which 
  * shader; tiles as 4 bytes a pixel, without mipmaps (the level rule never shrinks a tile much).
  */
 const MEMORY_BUDGET = 32 * 2 ** 20;
+
+/**
+ * The second level of the cache: units the sandpile evicted from the GPU, kept in memory as
+ * they arrived (tile files, splat records), which is 10-40x smaller than decoded. A view that
+ * needs one again rebuilds it here instead of fetching it: splat records go straight back to
+ * the GPU, tiles are decoded again. Only what leaves this level too, least recently used
+ * first, is reported to the server as dropped. All of bills.jpg fits in about 8 MB.
+ */
+const STORE_BUDGET = 48 * 2 ** 20;
 const VIEW_EVERY_MS = 50;
 
 interface Chart { name: string; width: number; height: number; tile: number; maxLevel: number; split: number }
 interface SplatUnit {
   L: number; x: number; y: number; mode: number; w: number; h: number;
   n: number; count: number; packets: number; got: Set<number>;
+  records: Uint8Array;        // the raw records as they arrived, kept to rebuild the GPU buffer
   buf: WebGLBuffer | null; vao: WebGLVertexArrayObject | null; used: number;
 }
-interface Tile { L: number; x: number; y: number; tex: WebGLTexture; bytes: number; used: number }
+interface Tile {
+  L: number; x: number; y: number; tex: WebGLTexture; bytes: number; used: number;
+  file: Uint8Array; format: number;   // the tile as it arrived (JPEG or WebP), to decode again
+}
 type Uniforms = Record<string, WebGLUniformLocation | null>;
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
@@ -238,24 +251,36 @@ function onConfetti(b: DataView, bytes: Uint8Array): void {
   const id = key(L, x, y);
   let u = units.get(id);
   if (!u) {
-    u = { L, x, y, mode, w, h, n, count: 0, packets, got: new Set(), buf: null, vao: null, used: frameNo };
-    if (n) Object.assign(u, unitBuffers(n));
-    units.set(id, u);
-    cache?.add({ key: cacheKey(KIND_SPLAT, L, x, y), kind: KIND_SPLAT, level: L, x, y, bytes: n * RECORD }, performance.now());
+    u = reviveSplat(L, x, y) ?? undefined;    // evicted to the store: back, then carry on
+    if (!u) {
+      u = { L, x, y, mode, w, h, n, count: 0, packets, got: new Set(), records: new Uint8Array(n * RECORD),
+            buf: null, vao: null, used: frameNo };
+      if (n) Object.assign(u, unitBuffers(n));
+      units.set(id, u);
+      cache?.add({ key: cacheKey(KIND_SPLAT, L, x, y), kind: KIND_SPLAT, level: L, x, y, bytes: n * RECORD }, performance.now());
+    }
   }
   if (u.got.has(index)) return;               // a duplicate
   u.got.add(index);
   if (k === 0 || !u.buf) { dirty = true; return; }
   // the records go to the GPU exactly as they arrived: the vertex shader decodes them
+  const recs = bytes.subarray(CONFETTI_HEAD, CONFETTI_HEAD + k * RECORD);
+  u.records.set(recs, u.count * RECORD);
   gl.bindBuffer(gl.ARRAY_BUFFER, u.buf);
-  gl.bufferSubData(gl.ARRAY_BUFFER, u.count * RECORD, bytes.subarray(CONFETTI_HEAD, CONFETTI_HEAD + k * RECORD));
+  gl.bufferSubData(gl.ARRAY_BUFFER, u.count * RECORD, recs);
   u.count += k;
   dirty = true;
 }
 
 async function onTile(b: DataView, data: Uint8Array): Promise<void> {
   const L = b.getUint8(0), x = b.getUint32(1), y = b.getUint32(5), format = b.getUint8(9);
-  const blob = new Blob([data.slice(10)], { type: format === 1 ? "image/webp" : "image/jpeg" });
+  await placeTile(L, x, y, format, data.slice(10));
+  net.tiles++;
+}
+
+/** Decode a tile's file into a texture and put it in the first level of the cache. */
+async function placeTile(L: number, x: number, y: number, format: number, file: Uint8Array): Promise<void> {
+  const blob = new Blob([file as BlobPart], { type: format === 1 ? "image/webp" : "image/jpeg" });
   const bmp = await createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
   const tex = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -263,14 +288,73 @@ async function onTile(b: DataView, data: Uint8Array): Promise<void> {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  const t: Tile = { L, x, y, tex, bytes: bmp.width * bmp.height * 4, used: frameNo };
+  const t: Tile = { L, x, y, tex, bytes: bmp.width * bmp.height * 4, used: frameNo, file, format };
   bmp.close();
   const old = tiles.get(key(L, x, y));
   if (old) gl.deleteTexture(old.tex);
   tiles.set(key(L, x, y), t);
   cache?.add({ key: cacheKey(KIND_TILE, L, x, y), kind: KIND_TILE, level: L, x, y, bytes: t.bytes }, performance.now());
-  net.tiles++;
   dirty = true;
+}
+
+// ---------------------------------------------------------------------------------------
+// the second level: evicted units kept as they arrived (see STORE_BUDGET)
+// ---------------------------------------------------------------------------------------
+
+type Stored = { kind: number; L: number; x: number; y: number; bytes: number } &
+  ({ unit: SplatUnit } | { file: Uint8Array; format: number });
+const store = new Map<string, Stored>();        // insertion order = least recently used first
+let storedBytes = 0;
+const reviving = new Set<string>();
+const stats2 = { revived: 0, storeEvictions: 0 };
+
+function toStore(s: Stored): void {
+  store.set(cacheKey(s.kind, s.L, s.x, s.y), s);
+  storedBytes += s.bytes;
+  for (const [k, old] of store) {
+    if (storedBytes <= STORE_BUDGET) break;
+    store.delete(k);
+    storedBytes -= old.bytes;
+    stats2.storeEvictions++;
+    dropped.push({ kind: old.kind, level: old.L, x: old.x, y: old.y });   // now really gone
+  }
+}
+
+function fromStore(kind: number, L: number, x: number, y: number): Stored | null {
+  const k = cacheKey(kind, L, x, y), s = store.get(k);
+  if (!s) return null;
+  store.delete(k);
+  storedBytes -= s.bytes;
+  stats2.revived++;
+  return s;
+}
+
+/** A splat unit back from the store onto the GPU, or null if it is not there. */
+function reviveSplat(L: number, x: number, y: number): SplatUnit | null {
+  const s = fromStore(KIND_SPLAT, L, x, y);
+  if (!s || !("unit" in s)) return null;
+  const u = s.unit;
+  if (u.n) {
+    Object.assign(u, unitBuffers(u.n));
+    gl.bindBuffer(gl.ARRAY_BUFFER, u.buf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, u.records.subarray(0, u.count * RECORD));
+  }
+  u.used = frameNo;
+  units.set(key(L, x, y), u);
+  cache?.add({ key: cacheKey(KIND_SPLAT, L, x, y), kind: KIND_SPLAT, level: L, x, y, bytes: u.n * RECORD }, performance.now());
+  dirty = true;
+  return u;
+}
+
+/** A tile back from the store: decoded again, asynchronously. True if it was there. */
+function reviveTile(L: number, x: number, y: number): boolean {
+  const k = cacheKey(KIND_TILE, L, x, y);
+  if (reviving.has(k)) return true;
+  const s = fromStore(KIND_TILE, L, x, y);
+  if (!s || !("file" in s)) return false;
+  reviving.add(k);
+  void placeTile(L, x, y, s.format, s.file).finally(() => reviving.delete(k));
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -338,17 +422,23 @@ function evict(coverage: Map<string, number>): void {
   if (!cache) return;
   for (const k of cache.frame(coverage, performance.now())) {
     const [kind, L, x, y] = k.split("/").map(Number);
+    // off the GPU, into the store as it arrived; the server hears only when it leaves that too
     if (kind === KIND_SPLAT) {
       const u = units.get(key(L, x, y));
-      if (u?.vao) gl.deleteVertexArray(u.vao);
-      if (u?.buf) gl.deleteBuffer(u.buf);
+      if (!u) continue;
+      if (u.vao) gl.deleteVertexArray(u.vao);
+      if (u.buf) gl.deleteBuffer(u.buf);
+      u.vao = null;
+      u.buf = null;
       units.delete(key(L, x, y));
+      toStore({ kind, L, x, y, bytes: u.records.byteLength + 64, unit: u });
     } else {
       const t = tiles.get(key(L, x, y));
-      if (t) gl.deleteTexture(t.tex);
+      if (!t) continue;
+      gl.deleteTexture(t.tex);
       tiles.delete(key(L, x, y));
+      toStore({ kind, L, x, y, bytes: t.file.byteLength + 64, file: t.file, format: t.format });
     }
-    dropped.push({ kind, level: L, x, y });
   }
 }
 
@@ -430,7 +520,7 @@ function frame(): void {
     const [x0, y0] = toScreen(x * T * s, y * T * s);
     const [x1, y1] = toScreen((x * T + w) * s, (y * T + h) * s);
     if (x1 < 0 || y1 < 0 || x0 > cw || y0 > ch) return;
-    const u = units.get(key(L, x, y));
+    const u = units.get(key(L, x, y)) ?? reviveSplat(L, x, y);
     if (!u) return;                         // not here yet: the server is sending it
     u.used = frameNo;
     (u.mode === NORMALIZED ? base : detail).push({ u, x0, y0, x1, y1, s: cam.z * s });
@@ -451,7 +541,10 @@ function frame(): void {
       for (let y = Math.max(0, Math.floor(Y0 / span)); y <= Math.min(gr - 1, Math.floor(Y1 / span)); y++) {
         for (let x = Math.max(0, Math.floor(X0 / span)); x <= Math.min(gc - 1, Math.floor(X1 / span)); x++) {
           const t = tiles.get(key(L, x, y));
-          if (!t) continue;
+          if (!t) {
+            if (L === finest) reviveTile(L, x, y);   // back from the store if it is there
+            continue;
+          }
           t.used = frameNo;
           const [w, h] = unitSize(L, x, y);
           const [x0, y0] = toScreen(x * span, y * span);
@@ -541,6 +634,7 @@ function frame(): void {
     `blobs      ${(drawnBlobs / 1e3).toFixed(0)}k drawn, ${(blobBytes / RECORD / 1e3).toFixed(0)}k held\n` +
     `tiles      ${tileList.length} drawn, ${tiles.size} held\n` +
     `memory     ${((blobBytes + tileBytes) / 2 ** 20).toFixed(1)} of ${MEMORY_BUDGET / 2 ** 20} MB (blobs ${(blobBytes / 2 ** 20).toFixed(1)}, tiles ${(tileBytes / 2 ** 20).toFixed(1)}), ${cache?.evictions ?? 0} evicted\n` +
+    `stored     ${(storedBytes / 2 ** 20).toFixed(1)} of ${STORE_BUDGET / 2 ** 20} MB as it arrived, ${stats2.revived} rebuilt from it, ${stats2.storeEvictions} dropped\n` +
     `received   ${net.packets} messages, ${(net.bytes / 2 ** 20).toFixed(2)} MB\n` +
     `server     epoch ${srv.epoch ?? "-"}, ${srv.queued ?? "-"} queued, ${srv.sessions ?? "-"} session(s)`;
 }
