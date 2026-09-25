@@ -52,9 +52,22 @@ class Sheet:
         self.seen.append(text)
         return self.words.get(text, text)
 
-    def text(self, xy, text, size=18, bold=False, fill=INK, anchor="la"):
-        self.draw.text((xy[0] * SCALE, xy[1] * SCALE), self.t(text),
+    def text(self, xy, text, size=18, bold=False, fill=INK, anchor="la", raw=False):
+        """raw: text already translated (a wrapped line of a translated paragraph)."""
+        self.draw.text((xy[0] * SCALE, xy[1] * SCALE), text if raw else self.t(text),
                        font=font(size * SCALE, bold), fill=fill, anchor=anchor)
+
+    def wrap(self, text, width, size=18, bold=False):
+        """Translate a paragraph and break it into lines that fit `width`."""
+        f, words, lines, line = font(size * SCALE, bold), self.t(text).split(), [], ""
+        for w in words:
+            trial = f"{line} {w}".strip()
+            if f.getlength(trial) <= width * SCALE or not line:
+                line = trial
+            else:
+                lines.append(line)
+                line = w
+        return lines + ([line] if line else [])
 
     def rect(self, box, outline=RULE, fill=None, width=1, radius=0):
         x0, y0, x1, y1 = (v * SCALE for v in box)
