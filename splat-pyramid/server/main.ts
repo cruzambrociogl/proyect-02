@@ -1,11 +1,13 @@
 // The server: one UDP socket, one session per client half, a shared packet cache, and a
-// pacing loop that hands out a fixed sending rate (step 1 of the plan; run-and-tumble
-// replaces the fixed rate in step 3).
+// pacing loop. Each session sends at the rate its run-and-tumble controller chooses
+// (server/tumble.ts), and all of them together stay under the server's own cap.
 //
 //   node server/main.ts [--images DIR] [--port 9000] [--rate 50] [--impair SPEC]
 //
 // --images   folder of prepared images (each subfolder with pyramid.json and splats/)
-// --rate     sending rate in Mbit/s, shared by all sessions
+// --rate     the server's upload cap in Mbit/s, shared by all sessions (each session's own
+//            rate is chosen by run-and-tumble, up to this)
+// --fixed    send every session at exactly --rate, no rate control (for comparison)
 // --impair   emulate the path toward each client: loss, delay, rate... (shared/emulator.ts)
 
 import { createSocket } from "node:dgram";
@@ -21,6 +23,7 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "9000" },
     rate: { type: "string", default: "50" },
     impair: { type: "string", default: "none" },
+    fixed: { type: "boolean", default: false },
   },
 });
 
@@ -47,7 +50,8 @@ socket.on("message", (datagram, rinfo) => {
     if (m.type !== Type.HELLO) return;           // a session starts with HELLO
     // every client gets its own emulated path
     const path = new EmulatedPath(downstream, (msg) => socket.send(msg, rinfo.port, rinfo.address));
-    s = new Session({ address: rinfo.address, port: rinfo.port }, images, cache, (msg) => path.send(msg));
+    s = new Session({ address: rinfo.address, port: rinfo.port }, images, cache, (msg) => path.send(msg), rateBytes);
+    if (args.fixed) s.rc.rate = rateBytes;
     paths.set(key, path);
     sessions.set(key, s);
     console.log(`session ${key} started (${sessions.size} open)`);
@@ -61,23 +65,30 @@ socket.on("message", (datagram, rinfo) => {
   }
 });
 
-// Pacing: a token bucket. Every tick adds the bytes the rate allows (at most 10 ms worth, so
-// an idle spell never turns into a burst), and sessions with something to send share them
-// round-robin. A packet is sent whole even when it overdraws the bucket; the overdraft is
-// paid back on the next ticks, so the average rate holds whatever the packet size.
+// Pacing: token buckets. Every tick each session earns the bytes its own rate allows, and the
+// server as a whole earns what its cap allows; a session sends what both let it. A packet is
+// sent whole even when it overdraws a bucket; the overdraft is paid back on the next ticks,
+// so the average rate holds whatever the packet size. At most 10 ms of allowance is kept, so
+// an idle spell never turns into a burst.
 let last = performance.now();
-let tokens = 0;
+let serverTokens = 0;
 let turn = 0;
 setInterval(() => {
   const now = performance.now();
-  tokens = Math.min(tokens + rateBytes * ((now - last) / 1000), rateBytes * 0.01);
+  const dt = (now - last) / 1000;
   last = now;
-  if (tokens <= 0) return;
-  const busy = [...sessions.values()].filter((s) => !s.idle);
-  if (busy.length === 0) return;
-  const share = tokens / busy.length;
-  for (let i = 0; i < busy.length && tokens > 0; i++) {
-    tokens -= busy[(turn + i) % busy.length].pump(share);
+  serverTokens = Math.min(serverTokens + rateBytes * dt, rateBytes * 0.01);
+  const all = [...sessions.values()];
+  for (let i = 0; i < all.length; i++) {
+    const s = all[(turn + i) % all.length];
+    if (args.fixed) s.rc.rate = rateBytes;
+    s.tokens = Math.min(s.tokens + s.rc.rate * dt, s.rc.rate * 0.01);
+    const busy = !s.idle;
+    s.rc.tick(busy);
+    if (!busy || s.tokens <= 0 || serverTokens <= 0) continue;
+    const spent = s.pump(Math.min(s.tokens, serverTokens));
+    s.tokens -= spent;
+    serverTokens -= spent;
   }
   turn++;
 }, TICK_MS);

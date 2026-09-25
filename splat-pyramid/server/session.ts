@@ -7,6 +7,7 @@ import {
 } from "../shared/wire.ts";
 import { confetti, readSpx, tileParts, type Packets } from "../shared/units.ts";
 import type { PreparedImage } from "./image.ts";
+import { RunAndTumble } from "./tumble.ts";
 
 /** How long a unit waits after its last packet before an idle link may send it again. */
 export const TOPUP_WAIT_MS = 400;
@@ -101,6 +102,9 @@ export class Session {
   topupPackets = 0;
   topupBytes = 0;
   reported = { packets: 0, bytes: 0 };
+  /** How fast to send to this client; the server's pacing gives it `rate` bytes per second. */
+  readonly rc: RunAndTumble;
+  tokens = 0;
 
   readonly peer: Peer;
   readonly send: (msg: Buffer) => void;
@@ -108,7 +112,8 @@ export class Session {
   private cache: PacketCache;
 
   constructor(peer: Peer, images: Map<string, PreparedImage>, cache: PacketCache,
-              send: (msg: Buffer) => void) {
+              send: (msg: Buffer) => void, maxRate: number) {
+    this.rc = new RunAndTumble(maxRate);
     this.peer = peer;
     this.images = images;
     this.cache = cache;
@@ -152,6 +157,7 @@ export class Session {
       case Type.REPORT: {
         const r = decodeReport(m.payload);
         this.reported = { packets: r.packets, bytes: r.bytes };
+        this.rc.onReport(r);
         for (const c of r.units) {
           const s = this.units.get(unitKey(c));
           if (s) s.got = Math.max(s.got, c.got);
@@ -211,6 +217,7 @@ export class Session {
       const msg = encode(this.currentType, this.epoch, payload);
       this.send(msg);
       spent += msg.length;
+      this.rc.sent();
       this.packetsSent++;
       this.bytesSent += msg.length;
       if (this.repairing) {
@@ -306,6 +313,6 @@ export class Session {
     return { epoch: this.epoch, views: this.viewsSeen, queued: this.queue.length,
              unitsSent: this.unitsSent, packetsSent: this.packetsSent, bytesSent: this.bytesSent,
              cancelled: this.cancelled, topupPackets: this.topupPackets, topupBytes: this.topupBytes,
-             reported: this.reported, rate };
+             reported: this.reported, rate, control: this.rc.stats() };
   }
 }

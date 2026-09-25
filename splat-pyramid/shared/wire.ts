@@ -6,12 +6,19 @@
 //   4  u32       epoch: raised by the viewer on every change of view, so the server can drop
 //                anything still queued for an older one
 //   8  u32       payload length
-//  12  payload
+//  12  u32       sent at: the sender's clock in ms (wraps). The receiver compares it with its
+//                own clock: the absolute value means nothing (the clocks differ), but how it
+//                changes is how long packets are waiting in queues along the way
+//  16  payload
 //
 // All integers are big-endian. Datagrams stay under MAX_DATAGRAM so they never fragment.
 
 export const VERSION = 1;
-export const HEADER = 12;
+export const HEADER = 16;
+
+/** This process's clock for "sent at", in ms. */
+const clockZero = performance.now();
+export const clockMs = (): number => Math.floor(performance.now() - clockZero) >>> 0;
 export const MAX_DATAGRAM = 1200;
 
 export const Type = {
@@ -40,6 +47,7 @@ export function encode(type: TypeCode, epoch: number, payload: Uint8Array = new 
   out[3] = type;
   out.writeUInt32BE(epoch >>> 0, 4);
   out.writeUInt32BE(payload.length, 8);
+  out.writeUInt32BE(clockMs(), 12);
   out.set(payload, HEADER);
   return out;
 }
@@ -47,6 +55,7 @@ export function encode(type: TypeCode, epoch: number, payload: Uint8Array = new 
 export interface Message {
   type: number;
   epoch: number;
+  sentAt: number;
   payload: Buffer;
 }
 
@@ -56,7 +65,8 @@ export function decode(datagram: Buffer): Message | null {
   if (datagram[2] !== VERSION) return null;
   const length = datagram.readUInt32BE(8);
   if (HEADER + length > datagram.length) return null;
-  return { type: datagram[3], epoch: datagram.readUInt32BE(4), payload: datagram.subarray(HEADER, HEADER + length) };
+  return { type: datagram[3], epoch: datagram.readUInt32BE(4), sentAt: datagram.readUInt32BE(12),
+           payload: datagram.subarray(HEADER, HEADER + length) };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -120,13 +130,18 @@ export function decodeView(b: Buffer): View {
 }
 
 /**
- * REPORT: what arrived. Also the session's keepalive.
+ * REPORT: what arrived. Also the session's keepalive, and the rate controller's senses.
  *
  * Confetti feedback is one number per unit: how many of its packets arrived. Never a list
  * of which were lost, never a per-packet acknowledgement.
  *
  *   0  u32  packets received so far     4  u32  bytes received so far
- *   8  u16  unit entries, then per unit: kind u8, level u8, x u32, y u32, got u16, total u16
+ *   8  u32  bytes received since the last report
+ *  12  u16  ms since the last report
+ *  14  i32  smallest one-way delay seen since the last report, ms (receive clock minus the
+ *           sender's "sent at": only its changes mean anything); INT32_MIN if none
+ *  18  u32  the newest "sent at" received      22  u16  ms held before this report (for RTT)
+ *  24  u16  unit entries, then per unit: kind u8, level u8, x u32, y u32, got u16, total u16
  */
 export interface UnitCount extends UnitId {
   got: number;
@@ -136,10 +151,16 @@ export interface UnitCount extends UnitId {
 export interface Report {
   packets: number;
   bytes: number;
+  intervalBytes: number;
+  intervalMs: number;
+  owdMin: number | null;
+  echo: number;
+  holdMs: number;
   units: UnitCount[];
 }
 
-const REPORT_FIXED = 10;
+const REPORT_FIXED = 26;
+const NO_DELAY = -0x80000000;
 const COUNT_BYTES = 14;
 /** How many unit counts fit in one REPORT datagram. */
 export const MAX_COUNTS = Math.floor((MAX_DATAGRAM - HEADER - REPORT_FIXED) / COUNT_BYTES);
@@ -149,7 +170,12 @@ export function encodeReport(r: Report): Buffer {
   const b = Buffer.alloc(REPORT_FIXED + units.length * COUNT_BYTES);
   b.writeUInt32BE(r.packets >>> 0, 0);
   b.writeUInt32BE(r.bytes >>> 0, 4);
-  b.writeUInt16BE(units.length, 8);
+  b.writeUInt32BE(r.intervalBytes >>> 0, 8);
+  b.writeUInt16BE(Math.min(65535, Math.round(r.intervalMs)), 12);
+  b.writeInt32BE(r.owdMin === null ? NO_DELAY : Math.max(NO_DELAY + 1, Math.min(0x7fffffff, Math.round(r.owdMin))), 14);
+  b.writeUInt32BE(r.echo >>> 0, 18);
+  b.writeUInt16BE(Math.min(65535, Math.round(r.holdMs)), 22);
+  b.writeUInt16BE(units.length, 24);
   units.forEach((u, i) => {
     const at = REPORT_FIXED + i * COUNT_BYTES;
     b[at] = u.kind;
@@ -163,12 +189,15 @@ export function encodeReport(r: Report): Buffer {
 }
 
 export function decodeReport(b: Buffer): Report {
-  const n = b.length >= REPORT_FIXED ? b.readUInt16BE(8) : 0;
+  const n = b.length >= REPORT_FIXED ? b.readUInt16BE(24) : 0;
   const units: UnitCount[] = [];
   for (let i = 0; i < n; i++) {
     const at = REPORT_FIXED + i * COUNT_BYTES;
     units.push({ kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6),
                  got: b.readUInt16BE(at + 10), total: b.readUInt16BE(at + 12) });
   }
-  return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4), units };
+  const owd = b.readInt32BE(14);
+  return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4), intervalBytes: b.readUInt32BE(8),
+           intervalMs: b.readUInt16BE(12), owdMin: owd === NO_DELAY ? null : owd,
+           echo: b.readUInt32BE(18), holdMs: b.readUInt16BE(22), units };
 }

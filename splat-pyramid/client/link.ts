@@ -7,7 +7,7 @@
 
 import { createSocket, type Socket } from "node:dgram";
 import {
-  Type, KIND_SPLAT, KIND_TILE, decode, encode, encodeReport, encodeView, unitKey,
+  Type, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeReport, encodeView, unitKey,
   type TypeCode, type UnitCount, type UnitId, type View,
 } from "../shared/wire.ts";
 import { TILE_HEAD, TILE_PART, readTilePart } from "../shared/units.ts";
@@ -41,6 +41,9 @@ export class ClientLink {
   private timer: NodeJS.Timeout;
   private started = new Map<string, number>();
   private closed = false;
+  // since the last report: for the server's rate controller
+  private interval = { bytes: 0, owdMin: null as number | null, since: performance.now() };
+  private echo = { sentAt: 0, receivedAt: 0 };
 
   constructor(server: string, upstream: Impairment = NONE) {
     const [host, port] = server.split(":");
@@ -125,6 +128,12 @@ export class ClientLink {
     if (!m) return;
     this.received.packets++;
     this.received.bytes += datagram.length;
+    this.interval.bytes += datagram.length;
+    // one-way delay on our clock minus theirs: its absolute value is meaningless, its rise is
+    // the queue building up somewhere on the path
+    const owd = (clockMs() - m.sentAt) | 0;
+    if (this.interval.owdMin === null || owd < this.interval.owdMin) this.interval.owdMin = owd;
+    this.echo = { sentAt: m.sentAt, receivedAt: performance.now() };
     switch (m.type) {
       case Type.WELCOME:
         this.welcomed = true;
@@ -177,7 +186,12 @@ export class ClientLink {
         this.units.delete(k);
       }
     }
-    this.send(Type.REPORT, encodeReport({ packets: this.received.packets, bytes: this.received.bytes,
-                                          units: [...changed, ...incomplete] }));
+    this.send(Type.REPORT, encodeReport({
+      packets: this.received.packets, bytes: this.received.bytes,
+      intervalBytes: this.interval.bytes, intervalMs: now - this.interval.since,
+      owdMin: this.interval.owdMin, echo: this.echo.sentAt, holdMs: now - this.echo.receivedAt,
+      units: [...changed, ...incomplete],
+    }));
+    this.interval = { bytes: 0, owdMin: null, since: now };
   }
 }
