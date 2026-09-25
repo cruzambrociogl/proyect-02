@@ -63,9 +63,10 @@ const http = createServer((req, res) => {
   const files: Record<string, [string, string]> = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/index.html": ["index.html", "text/html; charset=utf-8"],
-    "/viewer.js": [join("dist", "viewer.js"), "text/javascript; charset=utf-8"],
   };
-  const file = files[path];
+  // the compiled viewer's modules (viewer.js, sandpile.js, ...)
+  const script = /^\/([\w-]+\.js)$/.exec(path);
+  const file = files[path] ?? (script ? [join("dist", script[1]), "text/javascript; charset=utf-8"] : undefined);
   if (!file) {
     res.writeHead(404).end("not found");
     return;

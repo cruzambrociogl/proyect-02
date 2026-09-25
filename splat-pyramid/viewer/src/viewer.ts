@@ -1,3 +1,5 @@
+import { SandpileCache } from "./sandpile.js";
+
 // Splat pyramid viewer, v2: units arrive over a WebSocket from the client half instead of
 // being fetched. Splat blobs are drawn the moment their packet lands (any subset of a unit's
 // packets draws the whole unit, softer); image tiles arrive whole.
@@ -12,10 +14,14 @@ const CUTOFF = 3.0, MIN_REACH = 1.5, EPS = 1e-4;
 const NORMALIZED = 0;
 const KIND_SPLAT = 0, KIND_TILE = 1;
 const RECORD = 11, CONFETTI_HEAD = 29;          // must match shared/units.ts
-const FLOATS = 8;                           // x, y, sx, sy, theta, r, g, b
 
-const BLOB_BUDGET = 3_000_000;
-const TILE_BUDGET = 96 * 2 ** 20;
+const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
+/**
+ * Everything the viewer holds, blobs and tiles together: the sandpile cache (sandpile.ts)
+ * keeps it under this. Blobs are held as their raw 11-byte records, decoded by the vertex
+ * shader; tiles as 4 bytes a pixel, without mipmaps (the level rule never shrinks a tile much).
+ */
+const MEMORY_BUDGET = 32 * 2 ** 20;
 const VIEW_EVERY_MS = 50;
 
 interface Chart { name: string; width: number; height: number; tile: number; maxLevel: number; split: number }
@@ -46,15 +52,23 @@ if (!gl.getExtension("EXT_color_buffer_float")) fail("This viewer needs EXT_colo
 
 const BLOB_VS = `#version 300 es
 layout(location=0) in vec2 corner;
-layout(location=1) in vec2 pos;
-layout(location=2) in vec2 sig;
-layout(location=3) in float th;
-layout(location=4) in vec3 col;
+// one blob's raw 11-byte record, as it came off the wire (see splatpyr/codec.py):
+layout(location=1) in uvec4 rec0;     // x hi, x lo, y hi, y lo
+layout(location=2) in uvec4 rec1;     // sx, sy, theta, r
+layout(location=3) in uvec3 rec2;     // g, b, amp
 uniform vec2 u_origin;
 uniform float u_scale;
 uniform vec2 u_view;
+uniform vec2 u_unit;                  // the unit's width and height, which positions are relative to
 out vec2 v_d; out vec3 v_col; out vec2 v_sig; out float v_th; out float v_reach; out float v_gain;
+float s8(uint v) { return (v > 127u ? float(v) - 256.0 : float(v)) / 127.0; }
 void main() {
+  vec2 pos = -${POS_PAD.toFixed(1)} + vec2(float(rec0.x * 256u + rec0.y), float(rec0.z * 256u + rec0.w))
+             * (u_unit + 2.0 * ${POS_PAD.toFixed(1)}) / 65535.0;
+  vec2 sig = ${SIGMA_MIN} * exp(vec2(rec1.xy) / 255.0 * ${Math.log(SIGMA_MAX / SIGMA_MIN).toFixed(6)});
+  float th = float(rec1.z) * ${Math.PI.toFixed(6)} / 255.0;
+  float amp = ${AMP_MIN} * exp(float(rec2.z) / 255.0 * ${Math.log(AMP_MAX / AMP_MIN).toFixed(6)});
+  vec3 col = vec3(s8(rec1.w), s8(rec2.x), s8(rec2.y)) * amp;
   float reach = max(${CUTOFF.toFixed(1)} * max(sig.x, sig.y), ${MIN_REACH.toFixed(1)});
   vec2 s = max(sig, vec2(0.5 / u_scale));
   v_gain = (sig.x * sig.y) / (s.x * s.y);
@@ -143,7 +157,7 @@ const cornerBuf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-/** A unit's GPU buffer, sized for all its blobs; packets fill it as they land. */
+/** A unit's GPU buffer, sized for all its blobs' raw records; packets fill it as they land. */
 function unitBuffers(n: number): { vao: WebGLVertexArrayObject; buf: WebGLBuffer } {
   const vao = gl.createVertexArray()!;
   gl.bindVertexArray(vao);
@@ -152,10 +166,10 @@ function unitBuffers(n: number): { vao: WebGLVertexArrayObject; buf: WebGLBuffer
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   const buf = gl.createBuffer()!;
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, n * FLOATS * 4, gl.DYNAMIC_DRAW);
-  for (const [loc, size, off] of [[1, 2, 0], [2, 2, 8], [3, 1, 16], [4, 3, 20]]) {
+  gl.bufferData(gl.ARRAY_BUFFER, n * RECORD, gl.DYNAMIC_DRAW);
+  for (const [loc, size, off] of [[1, 4, 0], [2, 4, 4], [3, 3, 8]]) {
     gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, FLOATS * 4, off);
+    gl.vertexAttribIPointer(loc, size, gl.UNSIGNED_BYTE, RECORD, off);
     gl.vertexAttribDivisor(loc, 1);
   }
   gl.bindVertexArray(null);
@@ -194,10 +208,11 @@ const tiles = new Map<string, Tile>();
 const dropped: { kind: number; level: number; x: number; y: number }[] = [];
 const net = { packets: 0, bytes: 0, tiles: 0 };
 let serverStats: Record<string, any> = {};
-let frameNo = 0, cachedBlobs = 0, tileBytes = 0, dirty = true, needFit = false;
+let frameNo = 0, dirty = true, needFit = false;
+let cache: SandpileCache | null = null;          // made when the chart arrives
+const cacheKey = (kind: number, L: number, x: number, y: number) => `${kind}/${L}/${x}/${y}`;
 const key = (L: number, x: number, y: number) => `${L}/${x}/${y}`;
 
-const LSIG = Math.log(SIGMA_MAX / SIGMA_MIN), LAMP = Math.log(AMP_MAX / AMP_MIN);
 
 function onConfetti(b: DataView, bytes: Uint8Array): void {
   const L = b.getUint8(0), x = b.getUint32(1), y = b.getUint32(5), mode = b.getUint8(9);
@@ -209,27 +224,14 @@ function onConfetti(b: DataView, bytes: Uint8Array): void {
     u = { L, x, y, mode, w, h, n, count: 0, packets, got: new Set(), buf: null, vao: null, used: frameNo };
     if (n) Object.assign(u, unitBuffers(n));
     units.set(id, u);
-    cachedBlobs += n;
+    cache?.add({ key: cacheKey(KIND_SPLAT, L, x, y), kind: KIND_SPLAT, level: L, x, y, bytes: n * RECORD }, performance.now());
   }
   if (u.got.has(index)) return;               // a duplicate
   u.got.add(index);
   if (k === 0 || !u.buf) { dirty = true; return; }
-  const out = new Float32Array(k * FLOATS);
-  for (let i = 0; i < k; i++) {
-    const r = CONFETTI_HEAD + i * RECORD, o = i * FLOATS;
-    const amp = AMP_MIN * Math.exp((bytes[r + 10] / 255) * LAMP);
-    const s8 = (v: number) => ((v > 127 ? v - 256 : v) / 127) * amp;
-    out[o] = -POS_PAD + ((bytes[r] << 8) | bytes[r + 1]) * (w + 2 * POS_PAD) / 65535;
-    out[o + 1] = -POS_PAD + ((bytes[r + 2] << 8) | bytes[r + 3]) * (h + 2 * POS_PAD) / 65535;
-    out[o + 2] = SIGMA_MIN * Math.exp((bytes[r + 4] / 255) * LSIG);
-    out[o + 3] = SIGMA_MIN * Math.exp((bytes[r + 5] / 255) * LSIG);
-    out[o + 4] = (bytes[r + 6] * Math.PI) / 255;
-    out[o + 5] = s8(bytes[r + 7]);
-    out[o + 6] = s8(bytes[r + 8]);
-    out[o + 7] = s8(bytes[r + 9]);
-  }
+  // the records go to the GPU exactly as they arrived: the vertex shader decodes them
   gl.bindBuffer(gl.ARRAY_BUFFER, u.buf);
-  gl.bufferSubData(gl.ARRAY_BUFFER, u.count * FLOATS * 4, out);
+  gl.bufferSubData(gl.ARRAY_BUFFER, u.count * RECORD, bytes.subarray(CONFETTI_HEAD, CONFETTI_HEAD + k * RECORD));
   u.count += k;
   dirty = true;
 }
@@ -241,16 +243,15 @@ async function onTile(b: DataView, data: Uint8Array): Promise<void> {
   const tex = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
-  gl.generateMipmap(gl.TEXTURE_2D);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  const t: Tile = { L, x, y, tex, bytes: Math.round((bmp.width * bmp.height * 4 * 4) / 3), used: frameNo };
+  const t: Tile = { L, x, y, tex, bytes: bmp.width * bmp.height * 4, used: frameNo };
   bmp.close();
   const old = tiles.get(key(L, x, y));
-  if (old) { gl.deleteTexture(old.tex); tileBytes -= old.bytes; }
+  if (old) gl.deleteTexture(old.tex);
   tiles.set(key(L, x, y), t);
-  tileBytes += t.bytes;
+  cache?.add({ key: cacheKey(KIND_TILE, L, x, y), kind: KIND_TILE, level: L, x, y, bytes: t.bytes }, performance.now());
   net.tiles++;
   dirty = true;
 }
@@ -272,7 +273,13 @@ ws.onclose = () => { linkState = "closed"; dirty = true; };
 ws.onmessage = (e) => {
   if (typeof e.data === "string") {
     const m = JSON.parse(e.data);
-    if (m.type === "chart") { M = m as Chart; needFit = true; lastSent = ""; dirty = true; }
+    if (m.type === "chart") {
+      M = m as Chart;
+      cache = new SandpileCache(MEMORY_BUDGET, M.maxLevel);
+      needFit = true;
+      lastSent = "";
+      dirty = true;
+    }
     else if (m.type === "stats") { serverStats = m; dirty = true; }
     else if (m.type === "fault") fail(m.message);
     else if (m.type === "link") { linkState = m.state; dirty = true; }
@@ -305,28 +312,25 @@ function sendView(): void {
 // cache limits: evicted units are reported, or the server would never send them again
 // ---------------------------------------------------------------------------------------
 
-function evict(): void {
-  if (!M) return;
-  if (cachedBlobs > BLOB_BUDGET) {
-    const old = [...units.values()].filter((u) => u.used < frameNo && u.L !== M!.maxLevel).sort((a, b) => a.used - b.used);
-    for (const u of old) {
-      if (cachedBlobs <= BLOB_BUDGET * 0.85) break;
-      if (u.vao) gl.deleteVertexArray(u.vao);
-      if (u.buf) gl.deleteBuffer(u.buf);
-      cachedBlobs -= u.n;
-      units.delete(key(u.L, u.x, u.y));
-      dropped.push({ kind: KIND_SPLAT, level: u.L, x: u.x, y: u.y });
+/**
+ * One frame's worth of the cache: grains on what is on screen (by how much of the screen it
+ * covers), topplings, and, over the budget, evictions chosen by the sandpile.
+ */
+function evict(coverage: Map<string, number>): void {
+  if (!cache) return;
+  for (const k of cache.frame(coverage, performance.now())) {
+    const [kind, L, x, y] = k.split("/").map(Number);
+    if (kind === KIND_SPLAT) {
+      const u = units.get(key(L, x, y));
+      if (u?.vao) gl.deleteVertexArray(u.vao);
+      if (u?.buf) gl.deleteBuffer(u.buf);
+      units.delete(key(L, x, y));
+    } else {
+      const t = tiles.get(key(L, x, y));
+      if (t) gl.deleteTexture(t.tex);
+      tiles.delete(key(L, x, y));
     }
-  }
-  if (tileBytes > TILE_BUDGET) {
-    const old = [...tiles.values()].filter((t) => t.used < frameNo).sort((a, b) => a.used - b.used);
-    for (const t of old) {
-      if (tileBytes <= TILE_BUDGET * 0.85) break;
-      gl.deleteTexture(t.tex);
-      tileBytes -= t.bytes;
-      tiles.delete(key(t.L, t.x, t.y));
-      dropped.push({ kind: KIND_TILE, level: t.L, x: t.x, y: t.y });
-    }
+    dropped.push({ kind, level: L, x, y });
   }
 }
 
@@ -378,7 +382,7 @@ function frame(): void {
   frameNo++;
 
   const c = M, T = c.tile;
-  const finest = Math.max(0, Math.min(c.maxLevel, Math.floor(Math.log2(1 / cam.z))));
+  const finest = Math.max(0, Math.min(c.maxLevel, Math.floor(Math.log2(1 / cam.z) + LEVEL_BIAS)));
   const base: { u: SplatUnit; x0: number; y0: number; x1: number; y1: number; s: number }[] = [];
   const detail: typeof base = [];
   const tileList: { t: Tile; rect: [number, number, number, number] }[] = [];
@@ -442,6 +446,7 @@ function frame(): void {
       gl.scissor(sx0, ch - sy1, sx1 - sx0, sy1 - sy0);
       gl.uniform2f(blobProg.u.u_origin, x0, y0);
       gl.uniform1f(blobProg.u.u_scale, s);
+      gl.uniform2f(blobProg.u.u_unit, u.w, u.h);
       gl.bindVertexArray(u.vao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, u.count);
       drawnBlobs += u.count;
@@ -476,7 +481,17 @@ function frame(): void {
     }
   }
 
-  evict();
+  // how much of the screen each drawn unit covers: the grains of the cache's sandpile
+  const coverage = new Map<string, number>();
+  const cover = (k: string, x0: number, y0: number, x1: number, y1: number) => {
+    const w = Math.max(0, Math.min(cw, x1) - Math.max(0, x0)), h = Math.max(0, Math.min(ch, y1) - Math.max(0, y0));
+    coverage.set(k, (w * h) / (cw * ch));
+  };
+  for (const d of base.concat(detail)) cover(cacheKey(KIND_SPLAT, d.u.L, d.u.x, d.u.y), d.x0, d.y0, d.x1, d.y1);
+  for (const { t, rect } of tileList) cover(cacheKey(KIND_TILE, t.L, t.x, t.y), ...rect);
+  evict(coverage);
+  const blobBytes = [...units.values()].reduce((a, u) => a + u.n * RECORD, 0);
+  const tileBytes = [...tiles.values()].reduce((a, t) => a + t.bytes, 0);
   const partial = [...units.values()].filter((u) => u.got.size < u.packets).length;
   const deepest = Math.min(...base.concat(detail).map((d) => d.u.L), ...tileList.map((d) => d.t.L), c.maxLevel);
   const srv = serverStats.server ?? {};
@@ -486,9 +501,9 @@ function frame(): void {
     `level      ${deepest} drawn / ${finest} wanted (top ${c.maxLevel})\n` +
     `layers     splats ${c.maxLevel}..${c.split}` + (c.split > 0 ? `, tiles ${c.split - 1}..0` : "") + `\n` +
     `units      ${base.length + detail.length} drawn, ${units.size} held, ${partial} partial\n` +
-    `blobs      ${(drawnBlobs / 1e3).toFixed(0)}k drawn, ${(cachedBlobs / 1e3).toFixed(0)}k held\n` +
+    `blobs      ${(drawnBlobs / 1e3).toFixed(0)}k drawn, ${(blobBytes / RECORD / 1e3).toFixed(0)}k held\n` +
     `tiles      ${tileList.length} drawn, ${tiles.size} held\n` +
-    `gpu        ${((cachedBlobs * FLOATS * 4) / 2 ** 20).toFixed(1)} MB blobs + ${(tileBytes / 2 ** 20).toFixed(1)} MB tiles\n` +
+    `memory     ${((blobBytes + tileBytes) / 2 ** 20).toFixed(1)} of ${MEMORY_BUDGET / 2 ** 20} MB (blobs ${(blobBytes / 2 ** 20).toFixed(1)}, tiles ${(tileBytes / 2 ** 20).toFixed(1)}), ${cache?.evictions ?? 0} evicted\n` +
     `received   ${net.packets} messages, ${(net.bytes / 2 ** 20).toFixed(2)} MB\n` +
     `server     epoch ${srv.epoch ?? "-"}, ${srv.queued ?? "-"} queued, ${srv.sessions ?? "-"} session(s)`;
 }

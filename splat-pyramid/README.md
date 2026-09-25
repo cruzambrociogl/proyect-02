@@ -41,7 +41,7 @@ python3 bench/softness.py data/bills 2          # what losing splat packets does
 | `server/` | UDP server: sessions and their job plan, packet cache, pacing, run-and-tumble (`tumble.ts`) |
 | `client/` | client half: the protocol side (`link.ts`) and the browser bridge (`main.ts`) |
 | `viewer/` | WebGL viewer (TypeScript in `src/`, compiled to `dist/`) |
-| `bench/` | session benchmark and loss-softness measurement |
+| `bench/` | sessions over emulated links (`run.ts`), several users (`users.ts`), cache policies (`cache.ts`), loss softness (`softness.py`) |
 | `prototype/` | everything built before v2, untouched |
 
 ## Status
@@ -90,4 +90,22 @@ reordered one no longer leaves the viewer waiting.
    user's predicted path on idle capacity (on the 75k image, 3 MB more per session and
    views sharp later: 0.25 s against 0.19 s).
 
-Next: the sandpile cache (memory).
+6. Sandpile cache (browser memory): done. Everything the viewer holds, blobs and tiles, stays
+   under one 32 MB budget. Units are sites of a sandpile (neighbours: the 4 next to them on
+   their level, the one above, the ones below); every frame drops grains on what is on
+   screen, topplings carry them to the neighbours a pan reaches next and up to the coarse
+   levels every view rests on, and over the budget the units with the least activity per
+   byte are evicted (and reported to the server). `bench/cache.ts` compares it with plain
+   LRU on scripted sessions: zig-zagging over bills.jpg at 1:1 with 32 MB it downloads again
+   1.2 MB instead of 4.3 MB (8.1 MB in all instead of 11.2); coming back after panning away,
+   0.1 MB instead of 0.6. Going A, B, then A again the two are the same.
+
+   In a real browser, a 72-drag pan over the whole image at 1:1 kept memory between 28.7
+   and 31.9 MB through 643 evictions. (The two full-screen half-float targets the viewer
+   composes into are on top, constant: about 11 MB each at 1600 x 900.)
+
+   Also cut: blobs are held on the GPU as their raw 11-byte records, decoded in the vertex
+   shader, instead of 32 bytes of floats; tiles have no mipmaps; and a view draws the coarser
+   level from 1.68 image pixels per screen pixel on instead of 2 (at most 1.19x
+   magnification), so a frame never holds more than 2.8x the screen's pixels instead of 4x.
+   Together they took the simulated peak from 51.5 MB to 31.5 MB.

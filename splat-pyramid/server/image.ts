@@ -5,6 +5,20 @@ import { join } from "node:path";
 import { KIND_SPLAT, KIND_TILE, type UnitId, type View } from "../shared/wire.ts";
 import { FORMAT_JPEG, FORMAT_WEBP } from "../shared/units.ts";
 
+/**
+ * Which level a view draws: the finest whose pixels are no bigger than a screen pixel, give or
+ * take LEVEL_BIAS. With no bias, a level is kept until it is drawn at almost half size (1.99
+ * image pixels per screen pixel: nearly 4x the pixels the screen can show, about 47 MB of
+ * tiles for one 1080p frame). With 0.25 the coarser level takes over from 1.68 on, magnified
+ * at most 1.19x, and a frame never holds more than 2.8x the screen's pixels. The viewer uses
+ * the same rule (viewer/src/viewer.ts).
+ */
+export const LEVEL_BIAS = 0.25;
+
+export function levelFor(scale: number, maxLevel: number): number {
+  return Math.max(0, Math.min(maxLevel, Math.floor(Math.log2(Math.max(scale, 1e-9)) + LEVEL_BIAS)));
+}
+
 export interface Chart {
   name: string;
   width: number;
@@ -66,7 +80,7 @@ export class PreparedImage {
    */
   unitsFor(v: View): UnitId[] {
     const c = this.chart, T = c.tile;
-    const finest = Math.max(0, Math.min(c.maxLevel, Math.floor(Math.log2(Math.max(v.scale, 1e-9)))));
+    const finest = levelFor(v.scale, c.maxLevel);
     const X0 = v.cx - (v.screenW * v.scale) / 2, X1 = v.cx + (v.screenW * v.scale) / 2;
     const Y0 = v.cy - (v.screenH * v.scale) / 2, Y1 = v.cy + (v.screenH * v.scale) / 2;
     const distance = (level: number, x: number, y: number) => {
