@@ -122,7 +122,7 @@ def ingest(image_path, root, tile=256, split=None, splat_units=SPLAT_UNITS,
         split = split_for(width, height, tile, splat_units)
     split = max(0, min(split, top))
     log(f"{os.path.basename(image_path)}: {width}x{height}, levels 0..{top}, tile {tile}, "
-        f"splats {top}..{split}" + (f", tiles {split - 1}..0 ({tile_format})" if split else "")
+        f"splats {top}..{split}, tiles at every level ({tile_format})"
         + f" ({engine})")
     os.makedirs(root, exist_ok=True)
     if engine == "vips":
