@@ -7,7 +7,8 @@
     "server": "node server/main.ts",
     "client": "node client/main.ts",
     "build": "tsc -p viewer",
-    "check": "tsc -p . && tsc -p viewer --noEmit"
+    "check": "tsc -p . && tsc -p viewer --noEmit",
+    "test": "node test/fec.test.ts"
   },
   "dependencies": {
     "ws": "^8.21.3"
