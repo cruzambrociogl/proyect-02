@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splat Pyramid Viewer</title>
+<style>
+  :root { --bg: #111317; --panel: rgba(20, 22, 27, 0.86); --text: #e6e8ec; --muted: #9aa1ad; --accent: #7fb2ff; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #hud { position: fixed; top: 12px; left: 12px; background: var(--panel); border-radius: 8px;
+         padding: 10px 12px; min-width: 230px; backdrop-filter: blur(6px); }
+  #hud h1 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+  #stats { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); white-space: pre; }
+  #hud label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--muted); }
+  #hud input[type=range] { width: 120px; accent-color: var(--accent); }
+  #error { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px; text-align: center; }
+  @media (max-width: 480px) { #hud { left: 8px; right: 8px; top: 8px; min-width: 0; } }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud">
+  <h1>Splat pyramid</h1>
+  <div id="stats">loading…</div>
+  <label>chunks drawn <input id="chunks" type="range" min="1" max="4" value="4"><span id="chunksv">4</span></label>
+  <label>sharpness <input id="bias" type="range" min="-1" max="1" step="0.5" value="0"><span id="biasv">0</span></label>
+  <label>detail levels <input id="detail" type="checkbox" checked></label>
+  <label>image tiles near 1:1 <input id="tiles" type="checkbox" checked></label>
+  <label>exact pixels past 1:1 <input id="exact" type="checkbox" checked></label>
+</div>
+<div id="error"></div>
+<script src="viewer.js"></script>
+</body>
+</html>
