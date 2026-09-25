@@ -5,11 +5,14 @@
 // Here the heading is up or down for the sending rate, and "conditions" are a score from
 // the client's reports:
 //
-//   score = goodput x exp(-queueing delay / TAU)
+//   score = sending rate x exp(-queueing delay / TAU)
 //
-// Loss is left out on purpose. Confetti delivery tolerates it, and congestion shows up as
-// delay and flat goodput first. (An estimate from packets sent minus packets delivered also
-// counts the packets still in flight as lost, which punished every increase.)
+// Below the path's capacity, sending faster raises the score; past it, packets wait in the
+// bottleneck's queue, the delay term falls faster than the rate rises, and the score falls.
+// The rate is the one actually sent in the window (windows where the session had little to
+// send teach nothing and are skipped). Measured goodput was tried and swings with every burst
+// of random loss, which the erasure code repairs anyway: on a bursty link a 5% step could not
+// be told from noise. Loss is left out for the same reason; congestion shows up as delay.
 //
 // Below the path's capacity, sending faster raises goodput and the score; past it, packets
 // wait in the bottleneck's queue, delay grows and the score falls. So:
@@ -35,8 +38,15 @@
 import type { Report } from "../shared/wire.ts";
 import { clockMs } from "../shared/wire.ts";
 
-const TAU_MS = 25;          // queueing delay at which the score is divided by e
+const TAU_MS = 80;          // queueing delay at which the score is divided by e. Much larger
+                            // than the jitter a report window still shows (a few ms on a
+                            // mobile link): at 25 ms a 3 ms wobble moved the score 12%, more
+                            // than a 5% step, and the controller chased jitter downward
 const Q_MAX_MS = 150;       // queueing delay that forces an immediate cut
+const FIRST_RUN_EXIT_MS = 25;   // queueing delay that ends the first run...
+const FIRST_RUN_EXIT_PACKETS = 20;  // ...measured over at least this many packets: the smallest
+                                    // delay of a few packets on a jittery link can sit 25 ms
+                                    // above the true minimum with no queue at all
 const S_MIN = 0.05;         // smallest step: 5% of the rate
 const S_MAX = 0.5;          // longest step while running
 const EPS = 0.02;           // a score must beat the last one by 2% to count as better
@@ -61,7 +71,8 @@ export class RunAndTumble {
   private owdSamples: { at: number; owd: number }[] = [];
   srtt = 100;
   // the window since the last decision
-  private window = { bytes: 0, ms: 0, owdMin: null as number | null, sent: 0, delivered: 0, busy: 0, ticks: 0 };
+  private window = { bytes: 0, ms: 0, owdMin: null as number | null, sent: 0, sentBytes: 0, delivered: 0,
+                     busy: 0, ticks: 0, since: performance.now() };
   private lastDelivered = -1;
   // what it did, for STATS
   runs = 0;
@@ -75,9 +86,10 @@ export class RunAndTumble {
     this.max = max;
   }
 
-  /** The session sent a packet. */
-  sent(): void {
+  /** The session sent a packet of this many bytes. */
+  sent(bytes: number): void {
     this.window.sent++;
+    this.window.sentBytes += bytes;
   }
 
   /** One pacing tick passed; busy = the session had something to send. */
@@ -105,7 +117,8 @@ export class RunAndTumble {
     const base = Math.min(...this.owdSamples.map((s) => s.owd));
     const q = this.window.owdMin === null ? this.lastQ : Math.max(0, this.window.owdMin - base);
     this.q = q;
-    if (this.firstRun && q > TAU_MS) {                    // the first run found the ceiling
+    if (this.firstRun && q > FIRST_RUN_EXIT_MS && this.window.delivered >= FIRST_RUN_EXIT_PACKETS) {
+      // the first run found the ceiling
       this.firstRun = false;
       this.dir = -1;
       this.step = S_MIN;
@@ -133,9 +146,9 @@ export class RunAndTumble {
       this.resetWindow();
       return;
     }
-    const goodput = (w.bytes / w.ms) * 1000;
+    const sentRate = (w.sentBytes / Math.max(1, now - w.since)) * 1000;
     this.loss = w.sent > 0 ? Math.min(1, Math.max(0, 1 - w.delivered / w.sent)) : 0;   // shown only
-    const score = goodput * Math.exp(-q / TAU_MS);
+    const score = sentRate * Math.exp(-q / TAU_MS);
     this.score = score;
 
     if (this.lastScore === null || score > this.lastScore * (1 + EPS)) {
@@ -161,7 +174,8 @@ export class RunAndTumble {
   }
 
   private resetWindow(): void {
-    this.window = { bytes: 0, ms: 0, owdMin: null, sent: 0, delivered: 0, busy: 0, ticks: 0 };
+    this.window = { bytes: 0, ms: 0, owdMin: null, sent: 0, sentBytes: 0, delivered: 0, busy: 0, ticks: 0,
+                    since: performance.now() };
   }
 
   stats(): Record<string, unknown> {

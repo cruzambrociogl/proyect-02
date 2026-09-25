@@ -83,13 +83,16 @@ async function run(profile: string, rateSpec: string) {
   await link.bind();
   let stats: Record<string, any> = {};
   let chart = false;
-  link.events = { chart: () => { chart = true; }, stats: (s) => { stats = s; } };
+  const t0s = performance.now();
+  link.events = { chart: () => { chart = true; }, stats: (s) => {
+    stats = s;
+    if (process.env.TRACE) console.log(`  ${((performance.now() - t0s) / 1000).toFixed(1)} s`, JSON.stringify(s.control));
+  } };
   const t0 = performance.now();
-  // HELLO and OPEN ride the emulated path too: repeat until the server answers
+  link.hello();
+  link.open(args.image);                              // the link resends both until answered
   while (!chart) {
-    if (!link.welcomed) link.hello();
-    else link.open(args.image);
-    await sleep(200);
+    await sleep(20);
     if (performance.now() - t0 > 10_000) throw new Error("server never answered");
   }
 

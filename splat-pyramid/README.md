@@ -53,22 +53,28 @@ Following [PLAN.md](PLAN.md):
    count per unit comes back, repairs use idle capacity; the base unit is always repaired
    first. The most important chunk of every unit goes first. Detail levels are fitted
    loss-aware: at 1% loss the drawn image loses 0.4 dB instead of 3.1.
-3. Run-and-tumble: first version working, not yet tuned. Medians of 5 runs, time until
-   sharp against the best fixed rate picked by hand for each link:
+3. Run-and-tumble: working. Medians of 7 runs (jump) and 5 (dive), time until sharp against
+   the best fixed rate picked by hand for each link:
 
-   | session / link | run-and-tumble | best fixed rate |
+   | session / link | run-and-tumble (worst run) | best fixed rate (worst run) |
    |---|---|---|
-   | jump / LAN | 0.24 s | 0.10 s |
-   | jump / home | 0.75 s | 0.68 s |
-   | jump / mobile | 6.34 s | 4.01 s |
-   | dive / LAN | 0.73 s | 0.02 s |
-   | dive / home | 1.19 s | 0.39 s |
-   | dive / mobile | 5.31 s | 3.25 s |
+   | jump / LAN | 0.24 s (0.25) | 0.10 s |
+   | jump / home | 0.61 s (0.63) | 0.59 s (0.65) |
+   | jump / mobile | 4.56 s (4.85) | 3.61 s (4.06) |
+   | dive / LAN | 0.74 s | 0.02 s |
+   | dive / home | 1.06 s | 0.24 s |
+   | dive / mobile | 3.36 s | 2.86 s |
 
-   Known weak spots: it does not grow while the viewer is between views (app-limited), so a
-   zoom that ends with a big view starts from a low rate; and on the bursty mobile link it
-   settles near half the capacity.
+   It finds each link's rate on its own (on mobile it settles at the link's 2 Mbit/s). Known
+   weak spots: it does not grow while the viewer is between views, so a zoom that ends with
+   a big view starts from the rate reached mid-zoom; and the climb from 1 Mbit/s costs about
+   a second on the mobile link's 240 ms round trip.
+4. Erasure code (plan step 7, brought forward): done. Every block of a unit (a splat chunk,
+   or up to 64 tile parts) is repaired with fresh symbols, exactly as many as the client's
+   count says it is short, whichever packets were lost. Repair traffic on the home link fell
+   from 0.34 MB to 0.03 MB per session. `npm test` checks the code on its own.
 
-Repair still resends whole units, because the count does not say which packets were lost;
-on the mobile link repair is a large share of the bytes. The erasure code (plan step 7,
-brought forward) fixes that: repair symbols help whatever was lost.
+Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
+reordered one no longer leaves the viewer waiting.
+
+Next: the sandpile cache (memory), then Apollonius (2-3 users).
