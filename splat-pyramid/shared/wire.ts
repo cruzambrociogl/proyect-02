@@ -119,19 +119,56 @@ export function decodeView(b: Buffer): View {
            screenW: b.readUInt16BE(24), screenH: b.readUInt16BE(26), dropped };
 }
 
-/** REPORT: running totals of what arrived. Also the session's keepalive. */
+/**
+ * REPORT: what arrived. Also the session's keepalive.
+ *
+ * Confetti feedback is one number per unit: how many of its packets arrived. Never a list
+ * of which were lost, never a per-packet acknowledgement.
+ *
+ *   0  u32  packets received so far     4  u32  bytes received so far
+ *   8  u16  unit entries, then per unit: kind u8, level u8, x u32, y u32, got u16, total u16
+ */
+export interface UnitCount extends UnitId {
+  got: number;
+  total: number;
+}
+
 export interface Report {
   packets: number;
   bytes: number;
+  units: UnitCount[];
 }
 
+const REPORT_FIXED = 10;
+const COUNT_BYTES = 14;
+/** How many unit counts fit in one REPORT datagram. */
+export const MAX_COUNTS = Math.floor((MAX_DATAGRAM - HEADER - REPORT_FIXED) / COUNT_BYTES);
+
 export function encodeReport(r: Report): Buffer {
-  const b = Buffer.alloc(8);
+  const units = r.units.slice(0, MAX_COUNTS);
+  const b = Buffer.alloc(REPORT_FIXED + units.length * COUNT_BYTES);
   b.writeUInt32BE(r.packets >>> 0, 0);
   b.writeUInt32BE(r.bytes >>> 0, 4);
+  b.writeUInt16BE(units.length, 8);
+  units.forEach((u, i) => {
+    const at = REPORT_FIXED + i * COUNT_BYTES;
+    b[at] = u.kind;
+    b[at + 1] = u.level;
+    b.writeUInt32BE(u.x, at + 2);
+    b.writeUInt32BE(u.y, at + 6);
+    b.writeUInt16BE(Math.min(65535, u.got), at + 10);
+    b.writeUInt16BE(Math.min(65535, u.total), at + 12);
+  });
   return b;
 }
 
 export function decodeReport(b: Buffer): Report {
-  return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4) };
+  const n = b.length >= REPORT_FIXED ? b.readUInt16BE(8) : 0;
+  const units: UnitCount[] = [];
+  for (let i = 0; i < n; i++) {
+    const at = REPORT_FIXED + i * COUNT_BYTES;
+    units.push({ kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6),
+                 got: b.readUInt16BE(at + 10), total: b.readUInt16BE(at + 12) });
+  }
+  return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4), units };
 }
