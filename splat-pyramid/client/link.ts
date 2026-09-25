@@ -296,14 +296,21 @@ export class ClientLink {
         if (this.pendingOpen) this.send(Type.OPEN, this.pendingOpen.payload);
         this.events.welcome?.();
         break;
-      case Type.CHART:
+      case Type.CHART: {
         if (!this.pendingOpen) break;                         // a duplicate
+        const chart = JSON.parse(m.payload.toString("utf8"));
+        // a late answer to the page before's OPEN is not ours: epochs restart with every
+        // page, so only the name tells them apart
+        if (String(chart.name).normalize("NFC") !== this.pendingOpen.payload.toString("utf8").normalize("NFC")) break;
         this.pendingOpen = null;
-        this.events.chart?.(JSON.parse(m.payload.toString("utf8")));
+        this.events.chart?.(chart);
         break;
+      }
       case Type.STATS: {
         const stats = JSON.parse(m.payload.toString("utf8"));
-        this.serverEpoch = Math.max(this.serverEpoch, stats.epoch ?? 0);
+        // a late STATS from the page before (its epoch ahead of ours) must not count as the
+        // server having seen our views, or a lost first VIEW would never be sent again
+        if ((stats.epoch ?? 0) <= this.epoch) this.serverEpoch = Math.max(this.serverEpoch, stats.epoch ?? 0);
         this.events.stats?.(stats);
         break;
       }
