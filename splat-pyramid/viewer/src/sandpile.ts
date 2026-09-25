@@ -1,3 +1,6 @@
+// Replaced in the viewer by the forgetting curve (forgetting.ts); kept for bench/cache.ts,
+// which compares the two, and for Site, the shape both share.
+//
 // The viewer's cache policy: an Abelian sandpile (Bak-Tang-Wiesenfeld, with Dhar's result that
 // the order of topplings does not matter).
 //

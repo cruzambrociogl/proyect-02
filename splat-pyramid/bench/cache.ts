@@ -14,6 +14,7 @@ import { parseArgs } from "node:util";
 import { PreparedImage } from "../server/image.ts";
 import { KIND_SPLAT, KIND_TILE, unitKey, type UnitId, type View } from "../shared/wire.ts";
 import { LruCache, SandpileCache, type Site } from "../viewer/src/sandpile.ts";
+import { ForgettingCache } from "../viewer/src/forgetting.ts";
 
 const { values: args } = parseArgs({
   options: {
@@ -99,8 +100,10 @@ const sessions: Record<string, ReturnType<typeof view>[]> = {
   ],
 };
 
-function run(policy: "sandpile" | "lru", budget: number, frames: ReturnType<typeof view>[]) {
-  const cache = policy === "sandpile" ? new SandpileCache(budget, maxLevel) : new LruCache(budget, maxLevel);
+type Policy = "sandpile" | "forgetting" | "lru";
+function run(policy: Policy, budget: number, frames: ReturnType<typeof view>[]) {
+  const cache = policy === "sandpile" ? new SandpileCache(budget, maxLevel)
+    : policy === "forgetting" ? new ForgettingCache(budget, maxLevel) : new LruCache(budget, maxLevel);
   const everHad = new Set<string>();
   let wire = 0, refetch = 0, peak = 0;
   frames.forEach((v, i) => {
@@ -125,10 +128,11 @@ console.log(`${args.image} (${W} x ${H}), screen ${SW} x ${SH}`);
 const rows = [];
 for (const [name, frames] of Object.entries(sessions)) {
   for (const b of args.budget.split(",").map(Number)) {
-    const s = run("sandpile", b * MB, frames), l = run("lru", b * MB, frames);
-    rows.push({ session: name, "budget MB": b, "refetched MB, sandpile": f(s.refetch), "refetched MB, LRU": f(l.refetch),
-                "downloaded MB, sandpile": f(s.wire), "downloaded MB, LRU": f(l.wire),
-                "peak MB, sandpile": f(s.peak), "peak MB, LRU": f(l.peak) });
+    const s = run("sandpile", b * MB, frames), e = run("forgetting", b * MB, frames), l = run("lru", b * MB, frames);
+    rows.push({ session: name, "budget MB": b,
+                "refetched MB: sandpile / forgetting / LRU": `${f(s.refetch)} / ${f(e.refetch)} / ${f(l.refetch)}`,
+                "downloaded MB": `${f(s.wire)} / ${f(e.wire)} / ${f(l.wire)}`,
+                "peak MB": `${f(s.peak)} / ${f(e.peak)} / ${f(l.peak)}` });
   }
 }
 console.table(rows);

@@ -1,4 +1,4 @@
-import { SandpileCache } from "./sandpile.js";
+import { ForgettingCache } from "./forgetting.js";
 
 // Splat pyramid viewer, v2: units arrive over a WebSocket from the client half instead of
 // being fetched. Splat blobs are drawn the moment their packet lands (any subset of a unit's
@@ -34,14 +34,14 @@ function pixelRatio(): number {
 const canvasRatio = () => (canvas.clientWidth ? canvas.width / canvas.clientWidth : 1);
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
- * Everything the viewer holds, blobs and tiles together: the sandpile cache (sandpile.ts)
+ * Everything the viewer holds, blobs and tiles together: the forgetting-curve cache (forgetting.ts)
  * keeps it under this. Blobs are held as their raw 11-byte records, decoded by the vertex
  * shader; tiles as 4 bytes a pixel, without mipmaps (the level rule never shrinks a tile much).
  */
 const MEMORY_BUDGET = 32 * 2 ** 20;
 
 /**
- * The second level of the cache: units the sandpile evicted from the GPU, kept in memory as
+ * The second level of the cache: units the first level evicted from the GPU, kept in memory as
  * they arrived (tile files, splat records), which is 10-40x smaller than decoded. A view that
  * needs one again rebuilds it here instead of fetching it: splat records go straight back to
  * the GPU, tiles are decoded again. Only what leaves this level too, least recently used
@@ -239,7 +239,7 @@ const dropped: { kind: number; level: number; x: number; y: number }[] = [];
 const net = { packets: 0, bytes: 0, tiles: 0 };
 let serverStats: Record<string, any> = {};
 let frameNo = 0, dirty = true, needFit = false;
-let cache: SandpileCache | null = null;          // made when the chart arrives
+let cache: ForgettingCache | null = null;          // made when the chart arrives
 const cacheKey = (kind: number, L: number, x: number, y: number) => `${kind}/${L}/${x}/${y}`;
 const key = (L: number, x: number, y: number) => `${L}/${x}/${y}`;
 
@@ -377,7 +377,7 @@ ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.type === "chart") {
       M = m as Chart;
-      cache = new SandpileCache(MEMORY_BUDGET, M.maxLevel);
+      cache = new ForgettingCache(MEMORY_BUDGET, M.maxLevel);
       needFit = true;
       lastSent = "";
       dirty = true;
@@ -415,8 +415,8 @@ function sendView(): void {
 // ---------------------------------------------------------------------------------------
 
 /**
- * One frame's worth of the cache: grains on what is on screen (by how much of the screen it
- * covers), topplings, and, over the budget, evictions chosen by the sandpile.
+ * One frame's worth of the cache: what is on screen is reviewed, and, over the budget, the
+ * least retained per byte is evicted (the forgetting curve).
  */
 function evict(coverage: Map<string, number>): void {
   if (!cache) return;
@@ -613,7 +613,7 @@ function frame(): void {
     }
   }
 
-  // how much of the screen each drawn unit covers: the grains of the cache's sandpile
+  // what is on screen now, and how much of the screen each drawn unit covers
   const coverage = new Map<string, number>();
   const cover = (k: string, x0: number, y0: number, x1: number, y1: number) => {
     const w = Math.max(0, Math.min(cw, x1) - Math.max(0, x0)), h = Math.max(0, Math.min(ch, y1) - Math.max(0, y0));
