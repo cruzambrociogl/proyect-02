@@ -18,6 +18,11 @@
 // The server uses interest to decide what its shared packet cache keeps: a unit several users
 // are heading for is worth keeping, one nobody can reach soon goes first.
 //
+// And it uses each pursuer's speed to share its own upload when users want more than it can
+// send: a user sweeping across the image will have left the view before its detail lands,
+// one standing still will be looking at it. Each busy user gets a share in proportion to
+// 1 / (1 + speed): someone still gets most of it, someone moving fast still gets some.
+//
 // Tried and dropped: warming (preparing ahead of time the units several users converged on)
 // read more from disk, and prefetching each user's predicted path on idle capacity sent 3 MB
 // more per session on the 75k image. On the images measured so far this eviction policy
@@ -29,6 +34,7 @@ import type { PreparedImage } from "./image.ts";
 export const HORIZON_S = 2;
 const SPEED_FLOOR = 0.5;          // screens (or levels) per second: anyone can start moving
 const SPEED_HALFLIFE_S = 1;       // how quickly a remembered speed fades once a user stops
+const MOVING_HALFLIFE_MS = 150;   // the same, for "is it moving right now" (upload sharing)
 
 interface Pursuer {
   image: PreparedImage;
@@ -72,6 +78,19 @@ export class Apollonius {
 
   get users(): number {
     return this.pursuers.size;
+  }
+
+  /**
+   * How fast a user is moving right now, in screens (or levels) per second, for sharing the
+   * upload: the speed of its last move, halved every MOVING_HALFLIFE_MS it has been still.
+   * Much shorter than the memory used for reach (a user who jumped to a spot 200 ms ago is
+   * standing there now, and needs the data most), and 0 for a user standing still.
+   */
+  speed(user: string): number {
+    const p = this.pursuers.get(user);
+    if (!p) return 0;
+    const moved = Math.max(0, p.speed - SPEED_FLOOR);
+    return moved * 0.5 ** ((performance.now() - p.at) / MOVING_HALFLIFE_MS);
   }
 
   /** The remembered speed, faded by how long the user has been still. */

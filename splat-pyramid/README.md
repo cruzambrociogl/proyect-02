@@ -76,7 +76,7 @@ Following [PLAN.md](PLAN.md):
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 
-5. Apollonius (multiple users): built, no measured gain. Every user is a pursuer (position =
+5. Apollonius (multiple users): built, no measured gain in any of its uses. Every user is a pursuer (position =
    its view, speed = how fast it has been panning and zooming); the time to reach a unit is
    distance over speed, and between two users the Apollonius circle splits who gets there
    first. The server's shared packet cache evicts first what no user can reach within 2 s.
@@ -89,6 +89,22 @@ reordered one no longer leaves the viewer waiting.
    during a zoom most views are replaced before anything is sent), and prefetching each
    user's predicted path on idle capacity (on the 75k image, 3 MB more per session and
    views sharp later: 0.25 s against 0.19 s).
+
+   Pursuer speed also shares the server's upload when users want more than it can send: each
+   busy user gets a share in proportion to 1 / (1 + speed), speed being how fast it is
+   moving right now (a 150 ms memory, so a user who just jumped counts as standing still).
+   Measured with `bench/users.ts --scenario mixed` (one user sweeping across the image at 3
+   screens a second, two jumping to their own spot and staying, server capped at 10 Mbit/s):
+   no reliable gain, 5 runs each, time until sharp for the two who stay:
+
+   | per-user rates | Apollonius | equal shares |
+   |---|---|---|
+   | run-and-tumble | 1.56 s / 0.93 s | 1.69 s / 0.57 s |
+   | fixed at the cap | 1.38 s / 0.68 s | 1.76 s / 0.53 s |
+
+   The reason is that the protocol already does what the weighting was for: every new view
+   raises the epoch and the server drops what was still queued for the old one, so a user
+   sweeping across the image never builds a backlog and takes little of the upload anyway.
 
 6. Sandpile cache (browser memory): done. Everything the viewer holds, blobs and tiles, stays
    under one 32 MB budget. Units are sites of a sandpile (neighbours: the 4 next to them on

@@ -8,7 +8,8 @@
 // --rate     the server's upload cap in Mbit/s, shared by all sessions (each session's own
 //            rate is chosen by run-and-tumble, up to this)
 // --fixed    send every session at exactly --rate, no rate control (for comparison)
-// --no-apollonius   no multi-user model: the packet cache evicts plain LRU
+// --no-apollonius   no multi-user model: the packet cache evicts plain LRU, and the server's
+//                   upload is shared equally when it is what binds
 // --cache    MB of prepared packets the server keeps for all sessions (default 128)
 // --impair   emulate the path toward each client: loss, delay, rate... (shared/emulator.ts)
 
@@ -97,6 +98,11 @@ socket.on("message", (datagram, rinfo) => {
 // sent whole even when it overdraws a bucket; the overdraft is paid back on the next ticks,
 // so the average rate holds whatever the packet size. At most 10 ms of allowance is kept, so
 // an idle spell never turns into a burst.
+//
+// When the server's cap is what binds, its allowance is shared out: with Apollonius, in
+// proportion to 1 / (1 + speed) of each user (server/apollonius.ts), so the users who will
+// still be looking when the data lands get most of it; without, equally. What a session
+// cannot use goes to the others in a second pass.
 let last = performance.now();
 let serverTokens = 0;
 let turn = 0;
@@ -105,19 +111,31 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
   serverTokens = Math.min(serverTokens + rateBytes * dt, rateBytes * 0.01);
-  const all = [...sessions.values()];
+  const all = [...sessions.entries()];
+  const busy: [string, Session][] = [];
   for (let i = 0; i < all.length; i++) {
-    const s = all[(turn + i) % all.length];
+    const [key, s] = all[(turn + i) % all.length];
     if (args.fixed) s.rc.rate = rateBytes;
     s.tokens = Math.min(s.tokens + s.rc.rate * dt, s.rc.rate * 0.01);
-    const busy = !s.idle;
-    s.rc.tick(busy);
-    if (!busy || s.tokens <= 0 || serverTokens <= 0) continue;
-    const spent = s.pump(Math.min(s.tokens, serverTokens));
-    s.tokens -= spent;
-    serverTokens -= spent;
+    const b = !s.idle;
+    s.rc.tick(b);
+    if (b && s.tokens > 0) busy.push([key, s]);
   }
   turn++;
+  if (!busy.length || serverTokens <= 0) return;
+  const weight = (key: string) => (apollo ? 1 / (1 + apollo.speed(key)) : 1);
+  for (let pass = 0; pass < 2 && serverTokens > 0; pass++) {
+    const wanting = busy.filter(([, s]) => s.tokens > 0 && !s.idle);
+    const total = wanting.reduce((a, [k]) => a + weight(k), 0);
+    const pool = serverTokens;
+    for (const [key, s] of wanting) {
+      const share = pass === 0 ? (pool * weight(key)) / total : serverTokens;
+      if (share <= 0 || serverTokens <= 0) continue;
+      const spent = s.pump(Math.min(s.tokens, share));
+      s.tokens -= spent;
+      serverTokens -= spent;
+    }
+  }
 }, TICK_MS);
 
 // (Warming - preparing ahead of time the units several users were converging on - was tried

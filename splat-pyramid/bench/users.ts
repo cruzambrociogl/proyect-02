@@ -7,6 +7,10 @@
 // converge  every user starts on the whole image and zooms to 1:1 on the same spot, one
 //           after another (0.7 s apart): the later ones walk where the first already went
 // spread    every user zooms to a different spot
+// mixed     user 1 keeps panning across the image at 1:1 the whole time; the others jump to
+//           their own spot at 1:1 and stay. Meant for a server whose upload is the bottleneck
+//           (--rate below what the users could take together): who should get it? Sharp times
+//           are for the users who stop; the panner has no final view.
 //
 // --cache is the server's packet cache in MB: small, so what it keeps matters.
 
@@ -30,6 +34,7 @@ const { values: args } = parseArgs({
     apollonius: { type: "string", default: "both" },
     repeat: { type: "string", default: "3" },
     port: { type: "string", default: "9200" },
+    fixed: { type: "boolean", default: false },
   },
 });
 
@@ -57,11 +62,25 @@ const SPOTS = [[0.62, 0.41], [0.3, 0.7], [0.8, 0.25], [0.45, 0.2], [0.2, 0.3]];
 async function startServer(apollonius: boolean): Promise<ChildProcess> {
   const child = spawn(process.execPath, [join(import.meta.dirname, "..", "server", "main.ts"),
     "--images", args.images, "--port", args.port, "--rate", args.rate, "--impair", args.profile,
-    "--cache", args.cache, ...(apollonius ? [] : ["--no-apollonius"])], { stdio: ["ignore", "pipe", "inherit"] });
+    "--cache", args.cache, ...(apollonius ? [] : ["--no-apollonius"]), ...(args.fixed ? ["--fixed"] : [])],
+    { stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve) => {
     child.stdout!.on("data", (d: Buffer) => { if (d.toString().includes("server on udp")) resolve(child); });
   });
 }
+
+async function panner(link: ClientLink, until: () => boolean): Promise<void> {
+  const y = H * 0.4;
+  let x = W * 0.15, dir = 1;
+  while (!until()) {
+    x += dir * 300;                                        // 300 px per 50 ms: 6k px/s, 3 screens/s
+    if (x > W * 0.85 || x < W * 0.15) dir = -dir;
+    link.view({ cx: x, cy: y, scale: 1, screenW: SCREEN_W, screenH: SCREEN_H });
+    await sleep(50);
+  }
+}
+
+let holdersDone = 0;
 
 async function user(i: number, stats: Record<string, any>[]): Promise<number> {
   const link = new ClientLink(`127.0.0.1:${args.port}`, parseImpairment(args.profile));
@@ -71,12 +90,22 @@ async function user(i: number, stats: Record<string, any>[]): Promise<number> {
   link.hello();
   link.open(args.image);
   while (!chart) await sleep(20);
+  if (args.scenario === "mixed" && i === 0) {
+    await panner(link, () => holdersDone >= Number(args.users) - 1);
+    await sleep(600);
+    link.bye();
+    link.close();
+    return NaN;
+  }
   await sleep(i * 700);                                    // users arrive one after another
   const [sx, sy] = args.scenario === "converge" ? SPOTS[0] : SPOTS[i % SPOTS.length];
-  const views = dive(W * sx, H * sy);
+  // mixed: a jump straight to 1:1 after a look at the whole image; otherwise a zoom there
+  const views = args.scenario === "mixed"
+    ? [dive(W * sx, H * sy)[0], { cx: W * sx, cy: H * sy, scale: 1, screenW: SCREEN_W, screenH: SCREEN_H }]
+    : dive(W * sx, H * sy);
   for (const v of views.slice(0, -1)) {
     link.view(v);
-    await sleep(50);
+    await sleep(args.scenario === "mixed" ? 1500 : 50);
   }
   const final = views[views.length - 1];
   const needed = image.unitsFor({ ...final, dropped: [] });
@@ -90,6 +119,7 @@ async function user(i: number, stats: Record<string, any>[]): Promise<number> {
     const have = new Map(link.completeness().map((c) => [unitKey(c.id), c]));
     if (decisive.every((k) => { const c = have.get(k); return c && c.got === c.total; })) { sharp = performance.now() - t0; break; }
   }
+  holdersDone++;
   await sleep(1200);
   link.bye();
   link.close();
@@ -99,6 +129,7 @@ async function user(i: number, stats: Record<string, any>[]): Promise<number> {
 async function run(apollonius: boolean) {
   const server = await startServer(apollonius);
   const n = Number(args.users), stats: Record<string, any>[] = [];
+  holdersDone = 0;
   const sharp = await Promise.all(Array.from({ length: n }, (_, i) => user(i, stats)));
   server.kill();
   await sleep(300);
@@ -120,7 +151,7 @@ const modes = args.apollonius === "both" ? [true, false] : [args.apollonius === 
 for (const on of modes) {
   const runs: Awaited<ReturnType<typeof run>>[] = [];
   for (let r = 0; r < Number(args.repeat); r++) runs.push(await run(on));
-  const secs = (ms: number) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(2)} s` : "never");
+  const secs = (ms: number) => (Number.isNaN(ms) ? "panning" : Number.isFinite(ms) ? `${(ms / 1000).toFixed(2)} s` : "never");
   const perUser = runs[0].sharp.map((_, i) => secs(median(runs.map((r) => r.sharp[i]))));
   rows.push({
     apollonius: on ? "on" : "off",
