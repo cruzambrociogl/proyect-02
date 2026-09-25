@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splat Pyramid Gallery</title>
+<style>
+  :root { --bg: #111317; --panel: #1a1d23; --line: #2a2e36; --text: #e6e8ec; --muted: #9aa1ad; --accent: #7fb2ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header span { color: var(--muted); }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  a.card { display: block; text-decoration: none; color: inherit; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; overflow: hidden; transition: border-color .15s, transform .15s; }
+  a.card:hover, a.card:focus-visible { border-color: var(--accent); transform: translateY(-1px); outline: none; }
+  .thumb { aspect-ratio: 4 / 3; background: #0c0e11 center / contain no-repeat; }
+  .info { padding: 10px 12px; }
+  .name { font-weight: 600; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .note { color: var(--muted); padding: 24px; text-align: center; }
+  @media (max-width: 480px) { header { padding: 14px 16px; } .grid { grid-template-columns: 1fr 1fr; gap: 10px; } }
+</style>
+</head>
+<body>
+<header><h1>Gallery</h1><span id="sub">the images the server has ready</span></header>
+<main><div class="grid" id="grid"></div><div class="note" id="note">asking the server…</div></main>
+<script>
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let last = "";
+async function refresh() {
+  try {
+    const r = await fetch("/api/catalog");
+    if (!r.ok) throw new Error(await r.text());
+    const c = await r.json();
+    const text = JSON.stringify(c.images);
+    if (text === last) return;                    // nothing changed: keep the page as it is
+    last = text;
+    document.getElementById("note").textContent = c.images.length ? "" :
+      "No images ready yet. Upload and prepare some on the server site.";
+    document.getElementById("grid").innerHTML = c.images.map((i) => `
+      <a class="card" href="/?image=${encodeURIComponent(i.name)}">
+        <div class="thumb" style="background-image:url('/thumb/${encodeURIComponent(i.name)}')"></div>
+        <div class="info"><div class="name">${esc(i.name)}</div>
+          <div class="meta">${i.width.toLocaleString()} × ${i.height.toLocaleString()} px · ${(i.width * i.height / 1e6).toFixed(0)} Mpx</div>
+          <div class="meta">${i.maxLevel + 1} levels · splats ${i.maxLevel}–${i.split}${i.split > 0 ? `, tiles ${i.split - 1}–0` : ""}</div></div>
+      </a>`).join("");
+  } catch (e) {
+    document.getElementById("note").textContent = `Cannot reach the server: ${e.message}`;
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

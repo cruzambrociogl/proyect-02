@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splat Pyramid Server</title>
+<style>
+  :root { --bg: #111317; --panel: #1a1d23; --line: #2a2e36; --text: #e6e8ec; --muted: #9aa1ad;
+          --accent: #7fb2ff; --ok: #5fcf8c; --warn: #e6b450; --bad: #ef6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header span { color: var(--muted); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  .drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 22px; text-align: center; color: var(--muted); background: var(--panel); }
+  .drop.over { border-color: var(--accent); color: var(--text); }
+  .drop button, .row button { background: #2a3140; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                              padding: 6px 12px; font: inherit; cursor: pointer; }
+  .drop button:hover, .row button:hover { border-color: var(--accent); }
+  .row button.primary { background: #25406b; border-color: #35598f; }
+  .row button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .uploads { margin-top: 10px; display: grid; gap: 6px; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 28px 0 10px; }
+  .list { display: grid; gap: 10px; }
+  .row { display: grid; grid-template-columns: 96px 1fr auto; gap: 14px; align-items: center; background: var(--panel);
+         border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .thumb { width: 96px; height: 72px; border-radius: 6px; background: #0c0e11 center/contain no-repeat; }
+  .name { font-weight: 600; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid currentColor; margin-right: 6px; }
+  .ready { color: var(--ok); } .partial, .queued { color: var(--warn); } .failed { color: var(--bad); } .no { color: var(--muted); }
+  .working { color: var(--accent); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .job { margin-top: 6px; }
+  .job .line { font: 12px ui-monospace, Menlo, monospace; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  details pre { font: 12px ui-monospace, Menlo, monospace; color: var(--muted); background: #0c0e11; padding: 8px; border-radius: 6px;
+                max-height: 180px; overflow: auto; margin: 6px 0 0; white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 16px; text-align: center; }
+  @media (max-width: 640px) { .row { grid-template-columns: 64px 1fr; } .thumb { width: 64px; height: 48px; }
+    .actions { grid-column: 1 / -1; justify-content: flex-start; } header { padding: 14px 16px; } }
+</style>
+</head>
+<body>
+<header><h1>Splat pyramid server</h1><span>upload images, prepare them, see what is served</span></header>
+<main>
+  <div class="drop" id="drop">
+    Drop images here, or <button id="pick">choose files</button>
+    <input type="file" id="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.webp" multiple hidden>
+    <div class="meta" style="margin-top:6px">JPEG, PNG, TIFF or WebP, any size (streamed to disk). Files dropped into
+      <code id="originals">originals/</code> on the server show up here too.</div>
+    <div class="uploads" id="uploads"></div>
+  </div>
+  <h2>Images</h2>
+  <div class="list" id="list"><div class="empty">loading…</div></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const human = (b) => b == null ? "–" : b < 1024 ** 2 ? `${(b / 1024).toFixed(0)} KB` : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${(b / 1024 ** 3).toFixed(2)} GB`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function upload(file) {
+  const row = document.createElement("div");
+  row.innerHTML = `<div class="meta">${esc(file.name)} · ${human(file.size)}</div><div class="bar"><i></i></div>`;
+  $("uploads").append(row);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/api/upload?name=${encodeURIComponent(file.name)}`);
+  xhr.upload.onprogress = (e) => { row.querySelector("i").style.width = `${(100 * e.loaded / e.total).toFixed(1)}%`; };
+  xhr.onload = () => {
+    if (xhr.status === 200) { row.remove(); refresh(); }
+    else row.querySelector(".meta").textContent += ` · failed: ${JSON.parse(xhr.responseText).error}`;
+  };
+  xhr.send(file);
+}
+$("pick").onclick = () => $("file").click();
+$("file").onchange = () => { for (const f of $("file").files) upload(f); $("file").value = ""; };
+const drop = $("drop");
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); for (const f of e.dataTransfer.files) upload(f); };
+
+async function act(method, path, name) {
+  const r = await fetch(`${path}?name=${encodeURIComponent(name)}`, { method });
+  if (!r.ok) alert((await r.json()).error);
+  refresh();
+}
+
+function status(img) {
+  const j = img.job;
+  if (j && (j.state === "ingesting" || j.state === "fitting")) return `<span class="badge working">${j.state === "ingesting" ? "cutting the pyramid" : "fitting splats"}</span>`;
+  if (j && j.state === "queued") return `<span class="badge queued">queued</span>`;
+  if (j && j.state === "failed") return `<span class="badge failed">failed</span>`;
+  if (img.prepared === "ready") return `<span class="badge ready">ready, being served</span>`;
+  if (img.prepared === "partial") return `<span class="badge partial">partly prepared</span>`;
+  return `<span class="badge no">not prepared</span>`;
+}
+
+function render(data) {
+  $("originals").textContent = data.originals + "/";
+  const list = $("list");
+  if (!data.images.length) { list.innerHTML = `<div class="empty">No images yet. Upload one above.</div>`; return; }
+  const open = new Set([...list.querySelectorAll("details[open]")].map((d) => d.dataset.name));
+  list.innerHTML = data.images.map((img) => {
+    const j = img.job, busy = j && ["queued", "ingesting", "fitting"].includes(j.state);
+    const dims = img.width ? `${img.width.toLocaleString()} × ${img.height.toLocaleString()} px · ${((img.width * img.height) / 1e6).toFixed(0)} Mpx · levels 0–${img.maxLevel}, splats from ${img.split}` : "";
+    const thumb = img.prepared !== "no" ? `style="background-image:url('/thumb/${encodeURIComponent(img.name)}?${img.preparedBytes}')"` : "";
+    const actions = [];
+    if (img.original != null && !busy) actions.push(`<button class="primary" data-act="prepare">${img.prepared === "no" ? "Prepare" : "Prepare again"}</button>`);
+    if (img.prepared !== "no" && !busy) actions.push(`<button class="danger" data-act="unprepare">Remove prepared</button>`);
+    if (img.original != null && !busy) actions.push(`<button class="danger" data-act="original">Remove original</button>`);
+    const job = j ? `<div class="job">${j.state !== "done" ? `<div class="bar"><i style="width:${(100 * j.progress).toFixed(1)}%"></i></div>` : ""}
+      <div class="line">${esc(j.line)} · ${j.seconds.toFixed(0)} s</div>
+      <details data-name="${esc(img.name)}" ${open.has(img.name) ? "open" : ""}><summary class="meta">output</summary><pre>${esc(j.log.join("\n"))}</pre></details></div>` : "";
+    return `<div class="row" data-name="${esc(img.name)}"><div class="thumb" ${thumb}></div>
+      <div><div class="name">${esc(img.name)}</div>
+        <div class="meta">${status(img)}original ${human(img.original)}${img.preparedBytes ? ` · prepared ${human(img.preparedBytes)}` : ""}</div>
+        <div class="meta">${dims}</div>${job}</div>
+      <div class="actions">${actions.join("")}</div></div>`;
+  }).join("");
+  for (const b of list.querySelectorAll("button[data-act]")) {
+    const name = b.closest(".row").dataset.name;
+    b.onclick = () => {
+      if (b.dataset.act === "prepare") act("POST", "/api/prepare", name);
+      else if (b.dataset.act === "unprepare" && confirm(`Remove what was prepared for ${name}?`)) act("DELETE", "/api/prepared", name);
+      else if (b.dataset.act === "original" && confirm(`Remove the original ${name}?`)) act("DELETE", "/api/original", name);
+    };
+  }
+}
+
+let last = "";
+async function refresh() {
+  try {
+    const text = await (await fetch("/api/images")).text();
+    if (text === last) return;          // unchanged: do not rebuild the buttons under the pointer
+    last = text;
+    render(JSON.parse(text));
+  } catch { /* the server is restarting */ }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

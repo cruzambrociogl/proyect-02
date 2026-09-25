@@ -3,7 +3,7 @@
 // arrives, over a WebSocket on loopback. It also serves the viewer page.
 //
 //   node client/main.ts [--server 127.0.0.1:9000] [--port 8090] [--impair SPEC]
-//   then open http://127.0.0.1:8090/?image=NAME
+//   then open http://127.0.0.1:8090/ (the gallery) or http://127.0.0.1:8090/?image=NAME
 //
 // --impair emulates the path toward the server (views, reports); see shared/emulator.ts.
 //
@@ -57,25 +57,39 @@ link.events = {
   },
 };
 
-// the page and the WebSocket share one port
-const http = createServer((req, res) => {
-  const path = (req.url ?? "/").split("?")[0];
-  const files: Record<string, [string, string]> = {
-    "/": ["index.html", "text/html; charset=utf-8"],
-    "/index.html": ["index.html", "text/html; charset=utf-8"],
-  };
-  // the compiled viewer's modules (viewer.js, sandpile.js, ...)
-  const script = /^\/([\w-]+\.js)$/.exec(path);
-  const file = files[path] ?? (script ? [join("dist", script[1]), "text/javascript; charset=utf-8"] : undefined);
-  if (!file) {
-    res.writeHead(404).end("not found");
-    return;
-  }
+// The pages and the WebSocket share one port:
+//   /                 the gallery: the images the server has ready
+//   /?image=NAME      the viewer on one of them
+//   /api/catalog      the gallery's list, asked of the server over our protocol (LIST)
+//   /thumb/NAME       a preview, fetched from the server site (the only thing not over UDP)
+//   /*.js             the compiled viewer's modules
+const serverHost = args.server.split(":")[0];
+let site = 8000;                                   // the server site's port, learned from CATALOG
+const http = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", "http://x");
+  const send = (code: number, type: string, body: string | Buffer) =>
+    res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-cache" }).end(body);
   try {
-    res.writeHead(200, { "Content-Type": file[1], "Cache-Control": "no-cache" })
-       .end(readFileSync(join(VIEWER, file[0])));
-  } catch {
-    res.writeHead(500).end(`missing ${file[0]}: run "npm run build" first`);
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      const page = url.searchParams.has("image") ? "index.html" : "gallery.html";
+      return send(200, "text/html; charset=utf-8", readFileSync(join(VIEWER, page)));
+    }
+    if (url.pathname === "/api/catalog") {
+      const c = await link.list();
+      if (typeof c.site === "number") site = c.site;
+      return send(200, "application/json", JSON.stringify(c));
+    }
+    if (url.pathname.startsWith("/thumb/")) {
+      const r = await fetch(`http://${serverHost}:${site}${url.pathname}`);
+      if (!r.ok) return send(404, "text/plain", "no preview");
+      return send(200, r.headers.get("content-type") ?? "image/png", Buffer.from(await r.arrayBuffer()));
+    }
+    const script = /^\/([\w-]+\.js)$/.exec(url.pathname);
+    if (script) return send(200, "text/javascript; charset=utf-8", readFileSync(join(VIEWER, "dist", script[1])));
+    send(404, "text/plain", "not found");
+  } catch (e) {
+    const missing = String(e).includes("ENOENT") && url.pathname.endsWith(".js");
+    send(missing ? 500 : 502, "text/plain", missing ? 'run "npm run build" first' : String(e));
   }
 });
 
@@ -103,5 +117,5 @@ wss.on("connection", (ws) => {
 await link.bind();
 http.listen(Number(args.port), "127.0.0.1", () => {
   console.log(`client half: server ${args.server}, path to server: ${describe(upstream)}`);
-  console.log(`viewer on http://127.0.0.1:${args.port}/?image=NAME`);
+  console.log(`gallery on http://127.0.0.1:${args.port}/ (viewer on http://127.0.0.1:${args.port}/?image=NAME)`);
 });

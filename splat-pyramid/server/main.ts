@@ -2,9 +2,13 @@
 // pacing loop. Each session sends at the rate its run-and-tumble controller chooses
 // (server/tumble.ts), and all of them together stay under the server's own cap.
 //
-//   node server/main.ts [--images DIR] [--port 9000] [--rate 50] [--impair SPEC]
+//   node server/main.ts [--images data] [--originals originals] [--http 8000] [--port 9000]
+//                       [--rate 50] [--impair SPEC] [--python python3]
 //
-// --images   folder of prepared images (each subfolder with pyramid.json and splats/)
+// --images     folder of prepared images (each subfolder made by splatpyr ingest + build)
+// --originals  folder of source images, where the server site uploads to
+// --http       port of the server site (upload, prepare, see what is served)
+// --python     the Python with splatpyr's requirements, for preparing images
 // --rate     the server's upload cap in Mbit/s, shared by all sessions (each session's own
 //            rate is chosen by run-and-tumble, up to this)
 // --fixed    send every session at exactly --rate, no rate control (for comparison)
@@ -15,15 +19,21 @@
 
 import { createSocket } from "node:dgram";
 import { parseArgs } from "node:util";
-import { Type, decode, encode, typeName } from "../shared/wire.ts";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { Type, decode, encode, encodeCatalog, typeName } from "../shared/wire.ts";
 import { EmulatedPath, describe, parseImpairment } from "../shared/emulator.ts";
 import { findImages } from "./image.ts";
 import { PacketCache, Session } from "./session.ts";
 import { Apollonius } from "./apollonius.ts";
+import { startAdmin } from "./admin.ts";
 
 const { values: args } = parseArgs({
   options: {
-    images: { type: "string", default: "prototype" },
+    images: { type: "string", default: "data" },
+    originals: { type: "string", default: "originals" },
+    http: { type: "string", default: "8000" },
+    python: { type: "string", default: "python3" },
     port: { type: "string", default: "9000" },
     rate: { type: "string", default: "50" },
     impair: { type: "string", default: "none" },
@@ -33,10 +43,20 @@ const { values: args } = parseArgs({
   },
 });
 
+mkdirSync(args.images, { recursive: true });
+mkdirSync(args.originals, { recursive: true });
+// the images being served; sessions hold this map, so it is updated in place
 const images = findImages(args.images);
-if (images.size === 0) {
-  console.error(`no prepared images in ${args.images} (each needs pyramid.json and splats/)`);
-  process.exit(1);
+const refresh = () => findImages(args.images, images);
+setInterval(refresh, 2000);
+startAdmin({ port: Number(args.http), data: args.images, originals: args.originals, python: args.python,
+             root: join(import.meta.dirname, ".."), onReady: refresh });
+
+/** The catalog: the images ready to be viewed, for LIST. */
+function catalog(): Buffer[] {
+  refresh();
+  const list = [...images.values()].map((i) => i.chart).sort((a, b) => a.name.localeCompare(b.name));
+  return encodeCatalog(JSON.stringify({ images: list, site: Number(args.http) }));
 }
 const rateBytes = (Number(args.rate) * 1e6) / 8;
 const downstream = parseImpairment(args.impair);
@@ -70,6 +90,10 @@ socket.on("message", (datagram, rinfo) => {
   if (!m) return;
   const key = `${rinfo.address}:${rinfo.port}`;
   if (!admit(key)) return;
+  if (m.type === Type.LIST) {                    // needs no session: the gallery asks before opening
+    for (const part of catalog()) socket.send(encode(Type.CATALOG, m.epoch, part), rinfo.port, rinfo.address);
+    return;
+  }
   let s = sessions.get(key);
   if (!s) {
     if (m.type !== Type.HELLO) return;           // a session starts with HELLO

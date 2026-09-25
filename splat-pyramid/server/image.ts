@@ -122,14 +122,30 @@ export class PreparedImage {
   }
 }
 
-/** Every prepared image under a folder: each subfolder with a pyramid.json. */
-export function findImages(root: string): Map<string, PreparedImage> {
-  const found = new Map<string, PreparedImage>();
-  for (const name of readdirSync(root)) {
-    const dir = join(root, name);
-    if (existsSync(join(dir, "pyramid.json")) && existsSync(join(dir, "splats"))) {
-      found.set(name, new PreparedImage(dir, name));
-    }
+/** Whether a prepared folder is complete: every level of it is listed as ready. */
+export function isReady(dir: string): boolean {
+  try {
+    const meta = JSON.parse(readFileSync(join(dir, "pyramid.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    return (manifest.ready as number[]).length >= meta.max_level + 1;
+  } catch {
+    return false;
   }
-  return found;
+}
+
+/**
+ * Every image ready to be served under a folder: each subfolder whose preparation finished.
+ * With `into`, updates that map in place (sessions hold it), so images prepared while the
+ * server runs appear and deleted ones go.
+ */
+export function findImages(root: string, into = new Map<string, PreparedImage>()): Map<string, PreparedImage> {
+  const seen = new Set<string>();
+  for (const name of existsSync(root) ? readdirSync(root) : []) {
+    const dir = join(root, name);
+    if (!isReady(dir)) continue;
+    seen.add(name);
+    if (!into.has(name)) into.set(name, new PreparedImage(dir, name));
+  }
+  for (const name of [...into.keys()]) if (!seen.has(name)) into.delete(name);
+  return into;
 }

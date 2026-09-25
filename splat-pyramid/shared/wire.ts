@@ -34,6 +34,8 @@ export const Type = {
   FAULT: 10,     // server -> client: an error, text
   BYE: 11,       // either way: the session is over
   REPAIR: 12,    // server -> client: a mixture of one block's packets (fec.ts)
+  LIST: 13,      // client -> server: which images are there? (needs no session)
+  CATALOG: 14,   // server -> client: one part of the answer, JSON
 } as const;
 export type TypeCode = (typeof Type)[keyof typeof Type];
 
@@ -241,4 +243,28 @@ export function decodeRepair(b: Buffer): { head: RepairHead; symbol: Buffer } {
             k: b.readUInt16BE(11), width: b.readUInt16BE(13), index: b.readUInt16BE(15) },
     symbol: b.subarray(REPAIR_HEAD),
   };
+}
+
+/**
+ * CATALOG: the images ready to be viewed, as JSON, cut into parts that each fit a datagram.
+ *    0  u16 part   2  u16 parts   4  JSON text (the parts joined make the whole)
+ */
+export const CATALOG_HEAD = 4;
+const CATALOG_PART = MAX_DATAGRAM - HEADER - CATALOG_HEAD;
+
+export function encodeCatalog(json: string): Buffer[] {
+  const text = Buffer.from(json, "utf8");
+  const parts = Math.max(1, Math.ceil(text.length / CATALOG_PART));
+  return Array.from({ length: parts }, (_, i) => {
+    const piece = text.subarray(i * CATALOG_PART, (i + 1) * CATALOG_PART);
+    const b = Buffer.alloc(CATALOG_HEAD + piece.length);
+    b.writeUInt16BE(i, 0);
+    b.writeUInt16BE(parts, 2);
+    piece.copy(b, CATALOG_HEAD);
+    return b;
+  });
+}
+
+export function decodeCatalogPart(b: Buffer): { part: number; parts: number; text: Buffer } {
+  return { part: b.readUInt16BE(0), parts: b.readUInt16BE(2), text: b.subarray(CATALOG_HEAD) };
 }

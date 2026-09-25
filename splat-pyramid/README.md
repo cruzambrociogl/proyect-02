@@ -9,14 +9,26 @@ everything built before v2 is in [prototype/](prototype/).
 ```sh
 npm install
 npm run build                                   # compile the viewer (TypeScript -> viewer/dist)
-python3 -m splatpyr ingest IMAGE data/NAME      # prepare an image (needs numpy, scipy, Pillow;
-python3 -m splatpyr build data/NAME             #   pyvips and torch optional, see requirements.txt)
-node server/main.ts --images data               # server: UDP port 9000, upload cap 50 Mbit/s
+pip install -r requirements.txt                 # the Python preprocessing (numpy, scipy, Pillow;
+                                                #   pyvips and torch optional)
+node server/main.ts                             # server: UDP 9000, server site on http://localhost:8000/
 node client/main.ts --server 127.0.0.1:9000     # client half, on the viewer's machine
 ```
 
-Then open http://127.0.0.1:8090/?image=NAME. `#x=..&y=..&z=..` in the address opens on a
-spot (z = screen pixels per image pixel).
+**Server site**, http://localhost:8000/: upload images (streamed to disk, any size) or drop
+them into `originals/`, press **Prepare** (the Python preprocessing runs in the background,
+one image at a time, with its progress on the page), and see what is being served. Prepared
+images go to `data/` and are served as soon as they are ready.
+
+**Client site**, http://127.0.0.1:8090/: the gallery of the images the server has ready
+(the list travels over our protocol, LIST and CATALOG; only the thumbnails come from the
+server site over HTTP). Click one to open it in the viewer, or go straight to
+`/?image=NAME`. `#x=..&y=..&z=..` in the address opens on a spot.
+
+Server options: `--images data`, `--originals originals`, `--http 8000`, `--port 9000`,
+`--python python3` (the Python with the preprocessing's requirements), `--rate 50` (upload
+cap, Mbit/s). Images can also be prepared by hand: `python3 -m splatpyr ingest IMAGE
+data/NAME` then `python3 -m splatpyr build data/NAME`.
 
 Both server and client half take `--impair SPEC` to emulate a bad path: a profile (`lan`,
 `home`, `mobile`) or e.g. `loss=2%,delay=30ms,jitter=5ms,rate=20mbit` (see
@@ -38,9 +50,9 @@ python3 bench/softness.py data/bills 2          # what losing splat packets does
 |---|---|
 | `splatpyr/` | preprocessing (Python): ingest, splat fitting (loss-aware on the detail levels) |
 | `shared/` | message format (`wire.ts`), units as packets (`units.ts`), network emulator |
-| `server/` | UDP server: sessions and their job plan, packet cache, pacing, run-and-tumble (`tumble.ts`) |
+| `server/` | UDP server: sessions and their job plan, packet cache, pacing, run-and-tumble (`tumble.ts`), Apollonius, the server site (`admin.ts`, `admin.html`) |
 | `client/` | client half: the protocol side (`link.ts`) and the browser bridge (`main.ts`) |
-| `viewer/` | WebGL viewer (TypeScript in `src/`, compiled to `dist/`) |
+| `viewer/` | WebGL viewer (TypeScript in `src/`, compiled to `dist/`), sandpile cache, gallery page |
 | `bench/` | sessions over emulated links (`run.ts`), several users (`users.ts`), cache policies (`cache.ts`), loss softness (`softness.py`) |
 | `prototype/` | everything built before v2, untouched |
 

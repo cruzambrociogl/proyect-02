@@ -10,7 +10,7 @@
 import { createSocket, type Socket } from "node:dgram";
 import {
   Type, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeReport, encodeView, unitKey,
-  MAX_COUNTS, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
+  MAX_COUNTS, decodeCatalogPart, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
 } from "../shared/wire.ts";
 import { TILE_HEAD, TILE_PART, WIDTH_SPLAT, WIDTH_TILE, blockOfPacket, readTilePart } from "../shared/units.ts";
 import { BlockDecoder, frame, unframe } from "../shared/fec.ts";
@@ -149,6 +149,40 @@ export class ClientLink {
     }
   }
 
+  /**
+   * The images the server has ready, as its CATALOG says (needs no session). LIST is sent
+   * again every RETRY_MS until every part of the answer is in.
+   */
+  list(timeoutMs = 5000): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      const parts = new Map<number, Buffer>();
+      let expected = 0;
+      const ask = () => this.up.send(encode(Type.LIST, 0));
+      const retry = setInterval(ask, RETRY_MS);
+      const give = setTimeout(() => done(new Error("the server did not answer")), timeoutMs);
+      const done = (err: Error | null, value?: Record<string, unknown>) => {
+        clearInterval(retry);
+        clearTimeout(give);
+        this.catalogWaiters.delete(take);
+        if (err) reject(err);
+        else resolve(value!);
+      };
+      const take = (payload: Buffer) => {
+        const p = decodeCatalogPart(payload);
+        expected = p.parts;
+        parts.set(p.part, Buffer.from(p.text));
+        if (parts.size === expected) {
+          const text = Buffer.concat(Array.from({ length: expected }, (_, i) => parts.get(i)!)).toString("utf8");
+          done(null, JSON.parse(text));
+        }
+      };
+      this.catalogWaiters.add(take);
+      ask();
+    });
+  }
+
+  private catalogWaiters = new Set<(payload: Buffer) => void>();
+
   bye(): void {
     this.send(Type.BYE);
   }
@@ -284,6 +318,9 @@ export class ClientLink {
         break;
       case Type.REPAIR:
         this.onRepair(m.payload);
+        break;
+      case Type.CATALOG:
+        for (const take of this.catalogWaiters) take(m.payload);
         break;
     }
   }
