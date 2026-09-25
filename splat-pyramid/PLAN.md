@@ -23,7 +23,10 @@ preprocessing, the WebGL viewer, their measurements) is kept as is in
   3+ if it works**, without the traffic looking like a DDoS.
 - Suggested by the professor, not taken: **Abelian sandpile (Dhar's algorithm)** for request
   scheduling or cache redistribution, and **Circles of Apollonius** for predicting how many
-  users are interested in a tile.
+  users are interested in a tile. Both were built; then, in case classmates had taken them,
+  both were replaced by algorithms of our own choosing that measure as well or better: the
+  **forgetting curve** (Ebbinghaus) for the browser cache and **Physarum** (slime mould) for
+  several users. The first two are kept in the code for comparison.
 
 ## 2. What already exists
 
@@ -87,7 +90,7 @@ splat-pyramid/
   splatpyr/      preprocessing, brought over from prototype/
   viewer/        WebGL viewer, brought over from prototype/ and moved to TS
   shared/        messages, confetti packetising, erasure code, decoders
-  server/        sessions, scheduler, rate control, Apollonius interest
+  server/        sessions, scheduler, rate control, Physarum (several users)
   client/        client half: UDP <-> WebSocket
   bench/         emulator profiles, scripted sessions, multi-user runs
 ```
@@ -100,10 +103,12 @@ Main algorithms first. Each one has a fallback in case the professor finds it ta
 |---|---|---|---|---|
 | 1 | **loss on splat units (main)** | **Confetti delivery** (own) | server + client | none needed: specific to splats |
 | 2 | **sending rate (main)** | **Run-and-tumble** (bacterial chemotaxis, own) | server, per user | integrate-and-fire pacing |
-| 3 | multiple users | **Circles of Apollonius** (professor) | server | - |
-| 4 | client cache and memory | **Abelian sandpile, Dhar** (professor) | viewer | - |
-| 5 | sharing the server's upload among users (optional) | **Lotka-Volterra competition** | server | replicator dynamics |
-| 6 | loss on image tiles | v1's rateless erasure code with count-only feedback (own, from v1) | server + client | - |
+| 3 | multiple users: server cache and upload share | **Physarum**, Tero-Nakagaki slime-mould tubes | server | Circles of Apollonius (built first, `--multi apollonius`) |
+| 4 | client cache and memory | **Forgetting curve**, Ebbinghaus with spaced reviews | viewer | Abelian sandpile, Dhar (built first, kept in `sandpile.ts`) |
+| 5 | loss on image tiles | v1's rateless erasure code with count-only feedback (own, from v1) | server + client | - |
+
+Dropped: **Lotka-Volterra competition** for sharing the upload; Physarum's tubes do that job.
+Optional, not built: **Kuramoto oscillators** to push the users' send phases apart.
 
 ### 4.1 Confetti delivery (main)
 
@@ -177,86 +182,91 @@ charges a "membrane potential" that leaks over time; when it crosses a threshold
 "fires", cutting the rate, and then ignores further signals for a refractory period so one
 burst of loss is not punished several times. Between firings the rate grows.
 
-### 4.3 Circles of Apollonius: multiple users
+### 4.3 Physarum: multiple users
 
-**Problem.** With several users, the server should not read, prepare and send the same unit
-separately for each, should serve first whoever needs a unit first, and should know which
-units are worth keeping ready.
+**Problem.** With several users, the server should not read and packetise the same unit
+separately for each, should know which units are worth keeping ready, and, when its own
+upload is what limits, should decide who gets it.
 
-**Idea.** Classically, the circle of Apollonius separates the points one pursuer reaches
-first from the points another reaches first, given their speeds. Treat every user as a
-pursuer moving through the image: position is their current view, speed is how fast they are
-panning and zooming.
+**Idea.** The slime mould *Physarum polycephalum* builds its network by feedback: a tube's
+conductance `D` grows with the flow `Q` through it and decays without it,
+`dD/dt = f(|Q|) - D`, and flow splits between parallel tubes by conductance (Tero and
+Nakagaki's model). With `f(Q) = Q` one tube wins (shortest paths); with `f(Q) = Q^gamma`,
+`gamma < 1`, the tubes coexist and share the load.
 
-**How it works.**
+**How it works** (`server/physarum.ts`).
 
-1. From each user's view messages, the server keeps their position (centre and zoom level)
-   and velocity. Zoom is measured in levels, so zooming in by 2x is one step.
-2. For every unit, estimate each user's **time until they need it**: distance from their view
-   to the unit, divided by their speed toward it. Between two users with speeds `v1` and
-   `v2`, the units they reach at the same moment lie on the circle `|PA| / |PB| = v1 / v2`;
-   across all users this divides the image into regions of "who gets there first"
-   (a multiplicatively weighted Voronoi diagram, whose boundaries are Apollonius circles).
-3. **Interest count** of a unit: how many users will need it within a horizon (~2 s).
-   - Units with interest are kept ready in server memory, packetised once; every interested
-     user is sent from that one copy. For tiles this includes the erasure repair symbols,
-     which help any receiver whatever it lost.
-   - Units with no interest are dropped from server memory.
-4. **Order**: a unit goes first to the user who reaches it first; the others get it from the
-   ready copy.
-5. The same time-until-needed also orders a single user's sends. That is predictive
-   viewport (it fixed mid-zoom blur in v1) coming out of the same model.
+1. **Server packet cache.** Every cached unit, packetised once and sent from that one copy to
+   every user, is a node. Its conductance is the bytes served from it to anyone, decaying
+   with a 10 s half-life. Over the budget, the least conductance per byte is evicted first.
+2. **Upload share.** Each user is a tube from the server. When the server's cap binds, each
+   busy user's share is its conductance. Useful flow grows a tube: bytes of a tile, or of a
+   chunk of a splat unit, sent whole while that user's view still wanted it. Bytes of a unit
+   the user moved away from before it was sent whole are wasted. With `gamma = 1/2` the
+   tubes settle in proportion to how useful their flow has been; a floor of 0.1 means no
+   tube ever closes.
+
+**Measured** (`bench/users.ts`, 3 users, 5 runs each). With a 2 MB server cache, disk reads
+fall 27% when users converge on one spot and about half when they spread out, against both
+plain LRU and Apollonius. The upload share changed nothing measurable: every new view
+cancels what was queued for the old one (the epoch), so even a fast-panning user wastes
+only ~2% and all tubes stay near 1.
 
 **Not looking like a DDoS.** Clients never request units. They send one small view message
-per change and one report about every 50 ms. The server has a global upload cap, and every
-user's rate stays under it.
+per change and one report about every 100 ms, limited per client (60 messages a second,
+bursts of 120). The server has a global upload cap, and every user's rate stays under it.
 
-### 4.4 Abelian sandpile (Dhar): the client cache
+**Replaced: Circles of Apollonius** (`--multi apollonius`). Every user was a pursuer
+(position = its view, speed = how fast it pans and zooms); the time to reach a unit is
+distance over speed, and between two users the Apollonius circle `|PA| / |PB| = vA / vB`
+splits who gets there first. The cache evicted first what nobody could reach within 2 s,
+and the upload went in proportion to `1 / (1 + speed)`. It measured no gain in any use.
+
+### 4.4 Forgetting curve (Ebbinghaus): the client cache
 
 **Problem.** The viewer must stay under a fixed memory budget while zooming and panning,
 keep what will be needed again (especially coarse levels) and drop the rest.
 
-**Idea.** Every cached unit is a site holding a pile of "keep" grains. Looking at a unit adds
-grains; piles that grow too tall topple and pass grains to their neighbours, including the
-coarser unit above. Credit therefore flows toward the coarse levels that every view shares.
+**Idea.** Treat every cached unit as a memory, as spaced-repetition software does. Retention
+fades with time since it was last seen, `R = exp(-t / S)`, where `S` is its stability. Seeing
+it again is a review, and a review after time away makes it more stable, more so the more had
+been forgotten (the spacing effect). What the user keeps coming back to outlasts what was
+seen once.
 
-**How it works.**
+**How it works** (`viewer/src/forgetting.ts`).
 
-1. Sites are the cached units. Neighbours: the 4 adjacent units of the same level, the parent
-   (coarser) unit, the child (finer) units. The threshold of a site is its number of
-   neighbours.
-2. Every frame drops grains on the units on screen, in proportion to how much of the screen
-   they cover.
-3. A site at or above its threshold topples: it loses that many grains and each neighbour
-   gains one. Grains that fall on uncached units are lost (the sink).
-4. Over the memory budget, the units with the least grains per byte are evicted first.
-5. Dhar's result, the **Abelian property**, is that the order of topplings does not change
-   the final state. So the cache contents after a sequence of views are deterministic
-   whatever order events are processed in, and can be tested.
-6. Blobs move from 32 to 16 bytes on the GPU (half-precision), halving splat memory.
+1. A unit seen for the first time starts at `S = 4 s`, doubled per level up: a coarse unit
+   sits under every view of its area.
+2. Every frame, the units on screen are seen. Back on screen after more than 300 ms away
+   is a review: `S = S x (1 + 3 (1 - R))`.
+3. Over the 32 MB budget, the least retention per byte goes first; never the base unit,
+   never what is on screen. Evicted units are reported to the server (in VIEW).
+4. Behind it, a second level of 48 MB keeps evicted units as they arrived (compressed), so
+   coming back rebuilds them without the network.
 
-**To measure.** Steady and peak memory (target at most v1's 50 MB), bytes refetched after
-eviction, coarse-level retention during long pans. Open point: whether Dhar's burning
-algorithm gives a better eviction order than fewest grains per byte.
+**Measured** (`bench/cache.ts`, MB downloaded again at 32 MB): it matches the sandpile and
+both beat LRU; e.g. zig-zag over bills at 1:1, 1.6 MB against LRU's 4.4. Tried and left out:
+associative recall (a review also partly reviews the coarser unit and the neighbours),
+neutral.
 
-### 4.5 Lotka-Volterra competition (optional)
+**Replaced: Abelian sandpile, Dhar** (`viewer/src/sandpile.ts`). Every cached unit was a site
+holding grains; every frame dropped grains on what was on screen, and a site at its number
+of neighbours toppled, one grain to each (the 4 around it, the coarser unit, the finer ones),
+so credit flowed toward the coarse levels every view shares. Over the budget, the least
+activity per byte went first. Dhar's Abelian property makes the result independent of the
+order of topplings.
 
-**Only if 3+ users show one starving another.** The server's upload is a resource the
-sessions compete for. Each user's share `x_i` follows competitive Lotka-Volterra dynamics:
-`dx_i/dt = r x_i (1 - sum_j a_ij x_j / K_i)`, where `K_i` is that user's rate from
-run-and-tumble and `a_ij` is lower when two users are interested in the same units (one
-copy serves both). It settles on coexistence: nobody's share goes to zero.
-
-### 4.6 Tiles: v1's erasure code
+### 4.5 Tiles: v1's erasure code
 
 Image tiles are entropy-coded, so a tile with a missing packet cannot be decoded; confetti
 cannot apply. Tiles keep v1's scheme, ported to TypeScript: a systematic rateless erasure
 code over GF(256), the receiver reports only how many symbols it is short, and there is no
 acknowledgement. Repair symbols are generated once per tile and serve every user.
 
-## 5. Messages (draft)
+## 5. Messages
 
-A 12-byte header: magic, version, type, epoch, length. Then the payload.
+A 16-byte header: magic, version, type, epoch, length, and `sentAt` (for one-way delay).
+Then the payload.
 
 | type | direction | payload |
 |---|---|---|
@@ -266,21 +276,24 @@ A 12-byte header: magic, version, type, epoch, length. Then the payload.
 | `VIEW` | client to server | centre, zoom, screen size, units the cache evicted |
 | `REPORT` | client to server | packets received per unit in flight, symbols short per tile, bytes received, one-way delay samples |
 | `CONFETTI` | server to client | unit id, chunk, packet index and count, blobs |
-| `SYMBOL` | server to client | tile id, symbol index, symbol |
+| `TILEPART` | server to client | tile id, part index and count, bytes of the tile file |
+| `REPAIR` | server to client | unit id, erasure block, symbol index, repair symbol |
 | `STATS` | server to client | what the session is doing, for the viewer's panel |
 | `FAULT` | server to client | an error explained |
+| `BYE` | client to server | the session ends |
+| `LIST` / `CATALOG` | client to server / back | the images ready to view, for the gallery |
 
 ## 6. How each requirement is met
 
 | requirement | mechanism | measured by |
 |---|---|---|
 | no visible quality loss | exact tiles at 1:1; splat levels at a higher fit target (~38 dB, to decide) | time until the view is sharp; % of frames at screen resolution |
-| memory | sandpile budget, 16-byte blobs | steady and peak memory, target at most 50 MB |
+| memory | forgetting-curve cache under 32 MB, blobs as raw 11-byte records | steady and peak memory, target at most 50 MB |
 | number of requests | one session, server push | messages per second, vs v1's 1312 requests per zoom |
 | request weight | packets under 1200 bytes; most important chunk first | bytes per session, vs v1's 44.9 MB |
 | slow connection | run-and-tumble; most important first, so the whole image shows as splats within a few KB | time to first image at 2 Mbit/s, 120 ms delay |
 | packet loss | confetti for splats, erasure code for tiles | quality and time until sharp at 1%, 5% and bursty loss |
-| 2-3+ users, no DDoS | Apollonius interest and ordering, global cap, optional Lotka-Volterra | server CPU and upload, fairness between users, with 1, 2, 3 and 5 users |
+| 2-3+ users, no DDoS | Physarum cache and upload share, global cap, per-client message limit | server CPU and upload, fairness between users, with 1, 2, 3 and 5 users |
 
 ## 7. Test plan
 
@@ -310,9 +323,10 @@ Each step ends with something running and measured.
    plain fixed rate. Splat units and tiles travel as our messages and appear in the viewer.
 2. **Confetti delivery** plus the emulator. Measure loss as softness.
 3. **Run-and-tumble**, on the three link profiles.
-4. **Sandpile cache** and 16-byte blobs. Hit the memory target.
-5. **Apollonius**: 2 users, then 3 and 5.
-6. **Lotka-Volterra**, only if step 5 shows unfairness.
+4. **Client cache**: built as the sandpile, replaced by the forgetting curve. Hit the
+   memory target.
+5. **Several users**: built as Apollonius, replaced by Physarum. 2 users, then 3 and 5.
+6. ~~Lotka-Volterra~~: dropped, Physarum's tubes share the upload.
 7. **Tile erasure code** port (can run in parallel with 3-5).
 8. Full measurement against v1, and the write-up.
 
