@@ -67,20 +67,34 @@ export function readSpx(path: string): SplatUnit {
   return { mode, w, h, records, chunks };
 }
 
-/** The CONFETTI payloads of a splat unit, in sending order. */
-export function confetti(level: number, x: number, y: number, u: SplatUnit): Buffer[] {
+/**
+ * A unit's packets in sending order, and where each importance chunk ends: packets
+ * [ends[c-1], ends[c]) carry chunk c. An image tile is a single chunk.
+ */
+export interface Packets {
+  packets: Buffer[];
+  ends: number[];
+}
+
+/** The CONFETTI payloads of a splat unit, in sending order, chunk by chunk. */
+export function confetti(level: number, x: number, y: number, u: SplatUnit): Packets {
   const n = u.records.length / RECORD;
   const plan: number[][] = [];            // per packet: the blob rows it carries
+  const ends: number[] = [];
   let start = 0;
   for (const count of u.chunks) {
     const P = Math.max(1, Math.ceil(count / BLOBS_PER_PACKET));
     const packets: number[][] = Array.from({ length: P }, () => []);
     for (let j = 0; j < count; j++) packets[j % P].push(start + j);
     plan.push(...packets.filter((p) => p.length));
+    ends.push(plan.length);
     start += count;
   }
-  if (plan.length === 0) plan.push([]);   // an empty unit still says "I am complete"
-  return plan.map((rows, index) => {
+  if (plan.length === 0) {                // an empty unit still says "I am complete"
+    plan.push([]);
+    ends.push(1);
+  }
+  const packets = plan.map((rows, index) => {
     const b = Buffer.alloc(CONFETTI_HEAD + rows.length * RECORD);
     b[0] = level;
     b.writeUInt32BE(x, 1);
@@ -95,12 +109,13 @@ export function confetti(level: number, x: number, y: number, u: SplatUnit): Buf
     rows.forEach((r, i) => u.records.copy(b, CONFETTI_HEAD + i * RECORD, r * RECORD, (r + 1) * RECORD));
     return b;
   });
+  return { packets, ends };
 }
 
-/** The TILEPART payloads of an image tile, in order. */
-export function tileParts(level: number, x: number, y: number, format: number, data: Buffer): Buffer[] {
+/** The TILEPART payloads of an image tile, in order: one chunk. */
+export function tileParts(level: number, x: number, y: number, format: number, data: Buffer): Packets {
   const parts = Math.max(1, Math.ceil(data.length / TILE_PART));
-  return Array.from({ length: parts }, (_, i) => {
+  const packets = Array.from({ length: parts }, (_, i) => {
     const piece = data.subarray(i * TILE_PART, (i + 1) * TILE_PART);
     const b = Buffer.alloc(TILE_HEAD + piece.length);
     b[0] = level;
@@ -113,6 +128,7 @@ export function tileParts(level: number, x: number, y: number, format: number, d
     piece.copy(b, TILE_HEAD);
     return b;
   });
+  return { packets, ends: [packets.length] };
 }
 
 export interface TilePartHead {

@@ -13,15 +13,17 @@
 // For the final view of the session it measures:
 //   first   time until every unit the view needs has at least one packet (something drawn
 //           everywhere: with confetti, any packet of a unit draws the whole unit, softer)
-//   full    time until every unit the view needs has all its packets
-//   partial units still incomplete when the session ends, and how complete they are
+//   sharp   time until the view is at full quality: every image tile complete when the zoom
+//           wants tiles, else every splat unit complete (splat chunks under the tiles are
+//           sent last on purpose, as the placeholder for the next move)
+//   partial of the units that decide "sharp", those still incomplete when the hold ends
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ClientLink } from "../client/link.ts";
 import { parseImpairment } from "../shared/emulator.ts";
-import { unitKey, type View } from "../shared/wire.ts";
+import { KIND_TILE, unitKey, type View } from "../shared/wire.ts";
 import { PreparedImage } from "../server/image.ts";
 
 const { values: args } = parseArgs({
@@ -89,7 +91,10 @@ async function run(profile: string, rate: string) {
     await sleep(stepMs);
   }
   const final = views[views.length - 1];
-  const need = image.unitsFor({ ...final, dropped: [] }).map(unitKey);
+  const needed = image.unitsFor({ ...final, dropped: [] });
+  const need = needed.map(unitKey);
+  const tilesWanted = needed.some((u) => u.kind === KIND_TILE);
+  const decisive = needed.filter((u) => !tilesWanted || u.kind === KIND_TILE).map(unitKey);
   const sentAt = performance.now();
   link.view(final);
   let first = NaN, full = NaN;
@@ -98,12 +103,12 @@ async function run(profile: string, rate: string) {
     const have = new Map(link.completeness().map((c) => [unitKey(c.id), c]));
     const now = performance.now() - sentAt;
     if (Number.isNaN(first) && need.every((k) => (have.get(k)?.got ?? 0) > 0)) first = now;
-    if (Number.isNaN(full) && need.every((k) => { const c = have.get(k); return c && c.got === c.total; })) full = now;
+    if (Number.isNaN(full) && decisive.every((k) => { const c = have.get(k); return c && c.got === c.total; })) full = now;
     if (!Number.isNaN(full)) break;
   }
   await sleep(600);                                   // one more STATS from the server
   const have = new Map(link.completeness().map((c) => [unitKey(c.id), c]));
-  const partial = need.map((k) => have.get(k)).filter((c) => c && c.got < c.total);
+  const partial = decisive.map((k) => have.get(k) ?? { got: 0, total: 1 }).filter((c) => c.got < c.total);
   const srv = stats;
   link.bye();
   link.close();
@@ -114,7 +119,7 @@ async function run(profile: string, rate: string) {
   return {
     config: `${profile}@${rate}`,
     first: fmt(first),
-    full: fmt(full),
+    sharp: fmt(full),
     units: need.length,
     partial: `${partial.length}` + (partial.length ? ` (worst ${(worst * 100).toFixed(0)}%)` : ""),
     sentMB: ((srv.bytesSent ?? 0) / 2 ** 20).toFixed(2),
