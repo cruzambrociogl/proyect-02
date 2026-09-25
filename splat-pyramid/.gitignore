@@ -1,2 +1,5 @@
 node_modules/
 viewer/dist/
+data/
+__pycache__/
+*.pyc

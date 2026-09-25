@@ -1,0 +1,5 @@
+numpy
+scipy
+Pillow
+# optional: the polish step (GPU via MPS or CUDA when present)
+torch

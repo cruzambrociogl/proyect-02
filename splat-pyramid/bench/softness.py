@@ -7,7 +7,7 @@ packets dealt exactly as shared/units.ts deals them, on every level down to this
 the detail levels rest on the ones above), renders the level as the viewer does, and
 compares it with the same render without loss and with the original pixels.
 
-  python3 bench/softness.py prototype/out 2 [--loss 0.01,0.05,0.1,0.2,0.3] [--sample 12]
+  python3 bench/softness.py data/bills 2 [--loss 0.01,0.05,0.1,0.2,0.3] [--sample 12]
 """
 
 import argparse
@@ -18,7 +18,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "prototype"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from splatpyr import codec  # noqa: E402
 from splatpyr.build import Store  # noqa: E402
 
