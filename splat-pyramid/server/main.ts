@@ -12,8 +12,9 @@
 // --rate     the server's upload cap in Mbit/s, shared by all sessions (each session's own
 //            rate is chosen by run-and-tumble, up to this)
 // --fixed    send every session at exactly --rate, no rate control (for comparison)
-// --no-apollonius   no multi-user model: the packet cache evicts plain LRU, and the server's
-//                   upload is shared equally when it is what binds
+// --multi    the model of several users: physarum (default, server/physarum.ts), apollonius
+//            (server/apollonius.ts), or none (the packet cache evicts plain LRU, and the
+//            server's upload is shared equally when it is what binds)
 // --cache    MB of prepared packets the server keeps for all sessions (default 128)
 // --impair   emulate the path toward each client: loss, delay, rate... (shared/emulator.ts)
 
@@ -26,6 +27,7 @@ import { EmulatedPath, describe, parseImpairment } from "../shared/emulator.ts";
 import { findImages } from "./image.ts";
 import { PacketCache, Session } from "./session.ts";
 import { Apollonius } from "./apollonius.ts";
+import { Physarum } from "./physarum.ts";
 import { startAdmin } from "./admin.ts";
 
 const { values: args } = parseArgs({
@@ -38,7 +40,7 @@ const { values: args } = parseArgs({
     rate: { type: "string", default: "50" },
     impair: { type: "string", default: "none" },
     fixed: { type: "boolean", default: false },
-    "no-apollonius": { type: "boolean", default: false },
+    multi: { type: "string", default: "physarum" },
     cache: { type: "string", default: "128" },
   },
 });
@@ -63,8 +65,11 @@ const downstream = parseImpairment(args.impair);
 const TICK_MS = 2;
 const SESSION_TIMEOUT_MS = 30_000;
 const cache = new PacketCache(Number(args.cache) * 2 ** 20);
-const apollo = args["no-apollonius"] ? null : new Apollonius();
+if (!["physarum", "apollonius", "none"].includes(args.multi)) throw new Error(`--multi: physarum, apollonius or none`);
+const apollo = args.multi === "apollonius" ? new Apollonius() : null;
 if (apollo) cache.demand = (image, u) => apollo.demand(image, u).interest;
+const physarum = args.multi === "physarum" ? new Physarum() : null;
+cache.physarum = physarum;
 
 // Incoming messages per client: a client sends one view per change and a report every 100 ms,
 // so anything far beyond that is not a viewer. Excess is dropped, never processed.
@@ -103,6 +108,7 @@ socket.on("message", (datagram, rinfo) => {
     if (args.fixed) s.rc.rate = rateBytes;
     paths.set(key, path);
     if (apollo) s.attach(apollo, key);
+    if (physarum) s.attachPhysarum(physarum, key);
     sessions.set(key, s);
     console.log(`session ${key} started (${sessions.size} open)`);
   }
@@ -112,6 +118,7 @@ socket.on("message", (datagram, rinfo) => {
     sessions.delete(key);
     paths.delete(key);
     apollo?.forget(key);
+    physarum?.forget(key);
     incoming.delete(key);
     console.log(`session ${key} ended (${sessions.size} open)`);
   }
@@ -123,9 +130,11 @@ socket.on("message", (datagram, rinfo) => {
 // so the average rate holds whatever the packet size. At most 10 ms of allowance is kept, so
 // an idle spell never turns into a burst.
 //
-// When the server's cap is what binds, its allowance is shared out: with Apollonius, in
-// proportion to 1 / (1 + speed) of each user (server/apollonius.ts), so the users who will
-// still be looking when the data lands get most of it; without, equally. What a session
+// When the server's cap is what binds, its allowance is shared out: with Physarum, in
+// proportion to each user's tube (server/physarum.ts), which has grown with how useful the
+// data sent to it turned out; with Apollonius, in proportion to 1 / (1 + speed) of each user
+// (server/apollonius.ts), so the users who will still be looking when the data lands get most
+// of it; with neither, equally. What a session
 // cannot use goes to the others in a second pass.
 let last = performance.now();
 let serverTokens = 0;
@@ -147,7 +156,8 @@ setInterval(() => {
   }
   turn++;
   if (!busy.length || serverTokens <= 0) return;
-  const weight = (key: string) => (apollo ? 1 / (1 + apollo.speed(key)) : 1);
+  physarum?.adapt(busy.map(([k]) => k), dt);
+  const weight = (key: string) => (physarum ? physarum.conductance(key) : apollo ? 1 / (1 + apollo.speed(key)) : 1);
   for (let pass = 0; pass < 2 && serverTokens > 0; pass++) {
     const wanting = busy.filter(([, s]) => s.tokens > 0 && !s.idle);
     const total = wanting.reduce((a, [k]) => a + weight(k), 0);
@@ -174,6 +184,7 @@ setInterval(() => {
       sessions.delete(key);
       paths.delete(key);
       apollo?.forget(key);
+      physarum?.forget(key);
       incoming.delete(key);
       console.log(`session ${key} timed out (${sessions.size} open)`);
       continue;
@@ -182,7 +193,9 @@ setInterval(() => {
     const stats = { ...s.stats(rateBytes * 8), sessions: sessions.size,
                     cache: { hits: cache.hits, misses: cache.misses, ...cache.held, evictions: cache.evictions,
                              evictedWanted: cache.evictedWanted },
-                    apollonius: apollo ? { users: apollo.users } : null, refused,
+                    multi: args.multi, refused,
+                    tubes: physarum ? Object.fromEntries([...sessions.keys()].map((k) =>
+                      [k, { D: +physarum.conductance(k).toFixed(3), useful: +physarum.usefulness(k).toFixed(3) }])) : null,
                     cpuMs: Math.round((process.cpuUsage().user + process.cpuUsage().system) / 1000),
                     path: p ? { sent: p.sent, lost: p.dropped, queueDrops: p.queueDrops } : null };
     s.send(encode(Type.STATS, s.epoch, Buffer.from(JSON.stringify(stats))));

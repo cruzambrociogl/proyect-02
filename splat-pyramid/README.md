@@ -33,7 +33,8 @@ data/NAME` then `python3 -m splatpyr build data/NAME`.
 Both server and client half take `--impair SPEC` to emulate a bad path: a profile (`lan`,
 `home`, `mobile`) or e.g. `loss=2%,delay=30ms,jitter=5ms,rate=20mbit` (see
 `shared/emulator.ts`). The server's `--fixed` sends at exactly `--rate`, with no rate
-control, for comparison.
+control, for comparison. `--multi physarum|apollonius|none` picks the model of several
+users (Physarum by default).
 
 `npm run check` type-checks everything.
 
@@ -42,6 +43,8 @@ control, for comparison.
 ```sh
 node bench/run.ts --session jump --repeat 5     # scripted sessions over emulated links
 python3 bench/softness.py data/bills 2          # what losing splat packets does to the image
+node bench/cache.ts --image bills               # browser cache: forgetting curve, sandpile, LRU
+node bench/users.ts --scenario spread --cache 2 # several users: Physarum, Apollonius, none
 ```
 
 ## Where things are
@@ -50,9 +53,9 @@ python3 bench/softness.py data/bills 2          # what losing splat packets does
 |---|---|
 | `splatpyr/` | preprocessing (Python): ingest, splat fitting (loss-aware on the detail levels) |
 | `shared/` | message format (`wire.ts`), units as packets (`units.ts`), network emulator |
-| `server/` | UDP server: sessions and their job plan, packet cache, pacing, run-and-tumble (`tumble.ts`), Apollonius, the server site (`admin.ts`, `admin.html`) |
+| `server/` | UDP server: sessions and their job plan, packet cache, pacing, run-and-tumble (`tumble.ts`), Physarum (and Apollonius, for comparison), the server site (`admin.ts`, `admin.html`) |
 | `client/` | client half: the protocol side (`link.ts`) and the browser bridge (`main.ts`) |
-| `viewer/` | WebGL viewer (TypeScript in `src/`, compiled to `dist/`), sandpile cache, gallery page |
+| `viewer/` | WebGL viewer (TypeScript in `src/`, compiled to `dist/`), forgetting-curve cache (and the sandpile, for comparison), gallery page |
 | `bench/` | sessions over emulated links (`run.ts`), several users (`users.ts`), cache policies (`cache.ts`), loss softness (`softness.py`) |
 | `prototype/` | everything built before v2, untouched |
 
@@ -99,45 +102,69 @@ Following [PLAN.md](PLAN.md):
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 
-5. Apollonius (multiple users): built, no measured gain in any of its uses. Every user is a pursuer (position =
-   its view, speed = how fast it has been panning and zooming); the time to reach a unit is
-   distance over speed, and between two users the Apollonius circle splits who gets there
-   first. The server's shared packet cache evicts first what no user can reach within 2 s.
+5. Physarum (multiple users): the server's model of several users, `--multi physarum`
+   (default). Tero and Nakagaki's slime-mould model: tubes whose conductance grows with the
+   flow through them and decays without it (`server/physarum.ts`). Two uses:
+
+   - Server packet cache: every cached unit is a node, its conductance the bytes served
+     from it to anyone (half-life 10 s); over the budget the least conductance per byte goes
+     first. With a 2 MB cache, 3 users, `bench/users.ts`, 5 runs each (medians), disk reads:
+
+     | scenario | Physarum | Apollonius | none (LRU) |
+     |---|---|---|---|
+     | converge | **363** | 507 | 497 |
+     | spread | **8,223** | 14,766 | 16,781 |
+
+     Times until sharp stay the same (within noise). With the default 8 MB cache all three
+     read the same: at that size LRU already keeps everything the users share.
+   - Server upload, when its cap is what binds: one tube per user, each busy user gets a
+     share in proportion to its conductance. Useful flow grows a tube: bytes of a tile, or of
+     a chunk of a splat unit, sent whole while the user's view still wanted it; bytes of a
+     unit the user moved away from first were wasted. With f(Q) = Q^(1/2) the tubes settle in
+     proportion to how useful their flow has been, and none closes (floor 0.1). Measured with
+     `--scenario mixed --rate 10` (one user sweeping at 3 screens a second, two stopping):
+     the tubes stay close to 1, since usefulness is about 0.98 for all three. Even the
+     sweeping user wastes little, because every new view drops what was queued for the old
+     one (the epoch). No reliable change in times until sharp, as with Apollonius.
+     (`TUBES=1 node bench/users.ts ...` prints the tubes as they adapt.)
+
    Incoming messages are limited per client (60/s, bursts of 120).
 
-   `bench/users.ts` runs 3 users at once (converging on one spot, or spread out). On
-   bills.jpg and on the 75k x 75k image the eviction policy performs the same as plain LRU:
-   at these sizes LRU already shares every unit among the users. Two other uses were tried
-   and dropped: warming the units several users converged on (it read more from disk, since
-   during a zoom most views are replaced before anything is sent), and prefetching each
-   user's predicted path on idle capacity (on the 75k image, 3 MB more per session and
-   views sharp later: 0.25 s against 0.19 s).
+   Circles of Apollonius, the model before this one, is kept as `--multi apollonius`: every
+   user is a pursuer (position = its view, speed = how fast it pans and zooms), the time to
+   reach a unit is distance over speed, and the cache evicts first what nobody can reach
+   within 2 s; the upload goes in proportion to 1 / (1 + speed). It measured no gain in any
+   of its uses. Warming the units several users converged on, and prefetching each user's
+   predicted path, were tried with it and dropped (more disk reads; on the 75k image 3 MB
+   more per session and views sharp later).
 
-   Pursuer speed also shares the server's upload when users want more than it can send: each
-   busy user gets a share in proportion to 1 / (1 + speed), speed being how fast it is
-   moving right now (a 150 ms memory, so a user who just jumped counts as standing still).
-   Measured with `bench/users.ts --scenario mixed` (one user sweeping across the image at 3
-   screens a second, two jumping to their own spot and staying, server capped at 10 Mbit/s):
-   no reliable gain, 5 runs each, time until sharp for the two who stay:
+6. Forgetting-curve cache (browser memory): Ebbinghaus's curve, as spaced-repetition
+   software uses it (`viewer/src/forgetting.ts`). Everything the viewer holds, blobs and
+   tiles, stays under one 32 MB budget. Every unit is a memory with retention exp(-t / S);
+   being on screen is a review, and coming back after being away makes the memory more
+   stable, more so the more had been forgotten (the spacing effect). A first sight starts
+   with S = 4 s, doubled per level up (coarse units sit under every view of their area).
+   Over the budget the least retention per byte goes first (and is reported to the server).
+   Tried and left out: associative recall (a review also partly reviews the coarser unit
+   and the neighbours), neutral.
 
-   | per-user rates | Apollonius | equal shares |
-   |---|---|---|
-   | run-and-tumble | 1.56 s / 0.93 s | 1.69 s / 0.57 s |
-   | fixed at the cap | 1.38 s / 0.68 s | 1.76 s / 0.53 s |
+   `bench/cache.ts` replays scripted sessions against it, the Abelian sandpile it replaces
+   (`viewer/src/sandpile.ts`, kept for comparison) and plain LRU. MB downloaded again,
+   budget 32 MB:
 
-   The reason is that the protocol already does what the weighting was for: every new view
-   raises the epoch and the server drops what was still queued for the old one, so a user
-   sweeping across the image never builds a backlog and takes little of the upload anyway.
+   | session | image | forgetting | sandpile | LRU |
+   |---|---|---|---|---|
+   | pan away, come back | bills | **0.4** | **0.4** | 0.8 |
+   | A, B, then A again | bills | 7.2 | **6.6** | 11.7 |
+   | zig-zag at 1:1 | bills | **1.6** | **1.6** | 4.4 |
+   | pan away, come back | Holbein | **2.6** | 2.9 | 2.9 |
+   | A, B, then A again | Holbein | **20.2** | 20.6 | 23.9 |
+   | zig-zag at 1:1 | Holbein | 9.2 | **9.1** | 10.2 |
 
-6. Sandpile cache (browser memory): done. Everything the viewer holds, blobs and tiles, stays
-   under one 32 MB budget. Units are sites of a sandpile (neighbours: the 4 next to them on
-   their level, the one above, the ones below); every frame drops grains on what is on
-   screen, topplings carry them to the neighbours a pan reaches next and up to the coarse
-   levels every view rests on, and over the budget the units with the least activity per
-   byte are evicted (and reported to the server). `bench/cache.ts` compares it with plain
-   LRU on scripted sessions: zig-zagging over bills.jpg at 1:1 with 32 MB it downloads again
-   1.2 MB instead of 4.3 MB (8.1 MB in all instead of 11.2); coming back after panning away,
-   0.1 MB instead of 0.6. Going A, B, then A again the two are the same.
+   The forgetting curve matches the sandpile (within 0.6 MB either way at 16, 32 and 48 MB)
+   and both beat LRU. The per-byte choice is what matters most: by retention alone it is
+   LRU. (The sandpile: every unit a site, grains dropped on what is on screen, topplings
+   carry them to the neighbours and the coarser units, the least activity per byte evicted.)
 
    In a real browser, a 72-drag pan over the whole image at 1:1 kept memory between 28.7
    and 31.9 MB through 643 evictions. (The two full-screen half-float targets the viewer
@@ -154,7 +181,7 @@ reordered one no longer leaves the viewer waiting.
    on an emulated 2x screen received 8.5 MB with 325 evictions, and the targets take 23 MB.
    The cost: on such a screen 1:1 is 2x magnified (drawn pixelated when "exact pixels" is on).
 
-   Behind the sandpile there is a second level: what it evicts from the GPU is kept in
+   Behind the first level there is a second: what it evicts from the GPU is kept in
    memory as it arrived (tile files, splat records: 10-40x smaller than decoded), under a
    48 MB budget, and rebuilt from there when a view needs it again; only what leaves this
    level too is reported to the server. Zooming into the same four spots of bills.jpg twice

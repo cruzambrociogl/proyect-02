@@ -1,3 +1,6 @@
+// Replaced as the default by Physarum (physarum.ts); still runs with --multi apollonius, for
+// comparison.
+//
 // Circles of Apollonius: which connected users are about to need a unit, and who first.
 //
 // Every user is treated as a pursuer moving through the image. Its position is its current

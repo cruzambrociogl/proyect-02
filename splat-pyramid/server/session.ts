@@ -10,6 +10,7 @@ import { frame, repairSymbol } from "../shared/fec.ts";
 import type { PreparedImage } from "./image.ts";
 import { RunAndTumble } from "./tumble.ts";
 import type { Apollonius } from "./apollonius.ts";
+import type { Physarum } from "./physarum.ts";
 
 /** How long after its last packet a unit waits for the client's count, beyond a round trip. */
 const REPAIR_SLACK_MS = 250;
@@ -22,15 +23,19 @@ const REPAIR_SPARE = 1;
  * Packets of units, prepared once and shared by every session: the second viewer of a unit
  * costs no disk read and no packetising.
  *
- * Over the budget, it evicts by demand when it knows it (Apollonius, server/apollonius.ts):
- * first the units no connected user can reach within the horizon, least recently used first,
- * and only then the rest. Without demand, least recently used first.
+ * Over the budget, it evicts by the model of several users the server runs: with Physarum
+ * (server/physarum.ts), the least conductance per byte first, down to 90% of the budget; with
+ * Apollonius (server/apollonius.ts), first the units no connected user can reach within the
+ * horizon, least recently used first, and only then the rest. With neither, least recently
+ * used first.
  */
 export class PacketCache {
   private units = new Map<string, Packets>();
   private ids = new Map<string, { image: PreparedImage; unit: UnitId }>();
   /** How many users can reach a unit soon; null = plain LRU. */
   demand: ((image: PreparedImage, u: UnitId) => number) | null = null;
+  /** Physarum's conductance of each cached unit; null = not used. */
+  physarum: Physarum | null = null;
   evictions = 0;
   evictedWanted = 0;         // evictions of units someone could reach soon (only when forced)
   private framed = new WeakMap<Packets, Map<number, Uint8Array[]>>();
@@ -70,13 +75,30 @@ export class PacketCache {
     return { units: this.units.size, bytes: this.bytes };
   }
 
+  /** Bytes sent from a cached unit, to anyone: its flow, for Physarum. */
+  served(image: PreparedImage, u: UnitId, bytes: number): void {
+    this.physarum?.through(`${image.chart.name}/${unitKey(u)}`, bytes);
+  }
+
   private evict(keep: string): void {
     const drop = (k: string) => {
       this.bytes -= size(this.units.get(k)!);
       this.units.delete(k);
       this.ids.delete(k);
+      this.physarum?.dropNode(k);
       this.evictions++;
     };
+    if (this.physarum) {
+      const ph = this.physarum;
+      const order = [...this.units.entries()].filter(([k]) => k !== keep)
+        .map(([k, p]) => ({ k, worth: ph.node(k) / Math.max(1, size(p)) }))
+        .sort((a, b) => a.worth - b.worth);
+      for (const { k } of order) {
+        if (this.bytes <= this.budget * 0.9) return;
+        drop(k);
+      }
+      return;
+    }
     // first pass: nobody is heading for it; second pass (only if still over): anything
     for (const pass of this.demand ? [0, 1] : [1]) {
       for (const k of [...this.units.keys()]) {
@@ -159,6 +181,9 @@ export class Session {
   topupBytes = 0;
   /** Apollonius, if the server uses it: this user as a pursuer. */
   private apollo: Apollonius | null = null;
+  /** Physarum, if the server uses it: this user's tube, fed by how its bytes turned out. */
+  private physarum: Physarum | null = null;
+  private epochBytes = new Map<string, number>();   // bytes sent per unit since last judged
   private user = "";
   reported = { packets: 0, bytes: 0 };
   /** How fast to send to this client; the server's pacing gives it `rate` bytes per second. */
@@ -183,6 +208,37 @@ export class Session {
   attach(apollo: Apollonius, user: string): void {
     this.apollo = apollo;
     this.user = user;
+  }
+
+  /** Take part in Physarum as `user`: report how the bytes sent turned out. */
+  attachPhysarum(physarum: Physarum, user: string): void {
+    this.physarum = physarum;
+    this.user = user;
+  }
+
+  /**
+   * Physarum's flow: bytes are useful once what they belong to (a tile, or a chunk of a splat
+   * unit) has been sent whole while the view still wanted it. A new view that no longer wants
+   * a unit sent only in part makes its bytes so far wasted; the parts of units it still wants
+   * wait to be judged.
+   */
+  private delivered(key: string): void {
+    const b = this.epochBytes.get(key);
+    if (!this.physarum || !b) return;
+    this.epochBytes.delete(key);
+    if (this.wanted.has(key)) this.physarum.flowed(this.user, b, 0);
+    else this.physarum.flowed(this.user, 0, b);
+  }
+
+  private abandoned(still: Set<string>): void {
+    if (!this.physarum) return;
+    let wasted = 0;
+    for (const [k, b] of this.epochBytes) {
+      if (still.has(k)) continue;
+      wasted += b;
+      this.epochBytes.delete(k);
+    }
+    this.physarum.flowed(this.user, 0, wasted);
   }
 
   onMessage(m: Message): void {
@@ -215,6 +271,7 @@ export class Session {
         this.viewsSeen++;
         const all = this.image.unitsFor(v);
         this.wanted = new Set(all.map(unitKey));
+        this.abandoned(this.wanted);
         this.cancelled += this.queue.length;
         this.queue = this.plan(all);
         this.apollo?.see(this.user, this.image, v);
@@ -256,6 +313,7 @@ export class Session {
   }
 
   private reset(): void {
+    this.epochBytes.clear();
     this.image = null;
     this.view = null;
     this.units.clear();
@@ -286,11 +344,19 @@ export class Session {
       this.rc.sent(msg.length);
       this.packetsSent++;
       this.bytesSent += msg.length;
+      if (this.currentState) {
+        const k = unitKey(this.currentState.id);
+        this.epochBytes.set(k, (this.epochBytes.get(k) ?? 0) + msg.length);
+        if (this.image) this.cache.served(this.image, this.currentState.id, msg.length);
+      }
       if (this.repairing) {
         this.topupPackets++;
         this.topupBytes += msg.length;
       }
-      if (this.currentAt >= this.current.length && this.currentState) this.currentState.lastSend = performance.now();
+      if (this.currentAt >= this.current.length && this.currentState) {
+        this.currentState.lastSend = performance.now();
+        this.delivered(unitKey(this.currentState.id));
+      }
     }
     return spent;
   }

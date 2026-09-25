@@ -1,8 +1,9 @@
-// Several users at once against one server, each on its own emulated link: what Apollonius
-// saves the server (disk reads, CPU) and what the users see (time until sharp).
+// Several users at once against one server, each on its own emulated link: what the server's
+// model of several users (Physarum, Apollonius, or none) saves the server (disk reads, CPU)
+// and what the users see (time until sharp).
 //
 //   node bench/users.ts [--users 3] [--scenario converge|spread] [--profile home]
-//                       [--cache 8] [--apollonius on|off|both] [--repeat 3]
+//                       [--cache 8] [--multi physarum,apollonius,none] [--repeat 3]
 //
 // converge  every user starts on the whole image and zooms to 1:1 on the same spot, one
 //           after another (0.7 s apart): the later ones walk where the first already went
@@ -13,6 +14,7 @@
 //           are for the users who stop; the panner has no final view.
 //
 // --cache is the server's packet cache in MB: small, so what it keeps matters.
+// TUBES=1 prints Physarum's tubes (conductance/usefulness per user) twice a second.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
@@ -31,7 +33,7 @@ const { values: args } = parseArgs({
     profile: { type: "string", default: "home" },
     rate: { type: "string", default: "50" },
     cache: { type: "string", default: "8" },
-    apollonius: { type: "string", default: "both" },
+    multi: { type: "string", default: "physarum,apollonius,none" },
     repeat: { type: "string", default: "3" },
     port: { type: "string", default: "9200" },
     fixed: { type: "boolean", default: false },
@@ -59,10 +61,10 @@ function dive(px: number, py: number): Omit<View, "dropped">[] {
 
 const SPOTS = [[0.62, 0.41], [0.3, 0.7], [0.8, 0.25], [0.45, 0.2], [0.2, 0.3]];
 
-async function startServer(apollonius: boolean): Promise<ChildProcess> {
+async function startServer(multi: string): Promise<ChildProcess> {
   const child = spawn(process.execPath, [join(import.meta.dirname, "..", "server", "main.ts"),
-    "--images", args.images, "--port", args.port, "--rate", args.rate, "--impair", args.profile,
-    "--cache", args.cache, ...(apollonius ? [] : ["--no-apollonius"]), ...(args.fixed ? ["--fixed"] : [])],
+    "--images", args.images, "--port", args.port, "--http", "8190", "--rate", args.rate, "--impair", args.profile,
+    "--cache", args.cache, "--multi", multi, ...(args.fixed ? ["--fixed"] : [])],
     { stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve) => {
     child.stdout!.on("data", (d: Buffer) => { if (d.toString().includes("server on udp")) resolve(child); });
@@ -81,12 +83,13 @@ async function panner(link: ClientLink, until: () => boolean): Promise<void> {
 }
 
 let holdersDone = 0;
+const tubesSeen: string[] = [];   // TUBES=1: conductance/usefulness of every tube, twice a second
 
 async function user(i: number, stats: Record<string, any>[]): Promise<number> {
   const link = new ClientLink(`127.0.0.1:${args.port}`, parseImpairment(args.profile));
   await link.bind();
   let chart = false;
-  link.events = { chart: () => { chart = true; }, stats: (s) => { stats[i] = s; } };
+  link.events = { chart: () => { chart = true; }, stats: (s) => { stats[i] = s; if (process.env.TUBES && s.tubes && i === 1) tubesSeen.push(Object.values(s.tubes).map((x: any) => `${x.D}/${x.useful}`).join(" ")); } };
   link.hello();
   link.open(args.image);
   while (!chart) await sleep(20);
@@ -126,14 +129,15 @@ async function user(i: number, stats: Record<string, any>[]): Promise<number> {
   return sharp;
 }
 
-async function run(apollonius: boolean) {
-  const server = await startServer(apollonius);
+async function run(multi: string) {
+  const server = await startServer(multi);
   const n = Number(args.users), stats: Record<string, any>[] = [];
   holdersDone = 0;
   const sharp = await Promise.all(Array.from({ length: n }, (_, i) => user(i, stats)));
   server.kill();
   await sleep(300);
   const last = stats.filter(Boolean).sort((a, b) => b.cpuMs - a.cpuMs)[0] ?? {};
+  if (process.env.TUBES) console.log(JSON.stringify(tubesSeen));
   return {
     sharp,
     reads: last.cache?.misses ?? NaN,
@@ -147,14 +151,13 @@ async function run(apollonius: boolean) {
 console.log(`${args.image}: ${args.users} users, "${args.scenario}", ${args.profile} links, ` +
             `server cache ${args.cache} MB, ${args.repeat} runs each (medians)`);
 const rows = [];
-const modes = args.apollonius === "both" ? [true, false] : [args.apollonius === "on"];
-for (const on of modes) {
+for (const on of args.multi.split(",")) {
   const runs: Awaited<ReturnType<typeof run>>[] = [];
   for (let r = 0; r < Number(args.repeat); r++) runs.push(await run(on));
   const secs = (ms: number) => (Number.isNaN(ms) ? "panning" : Number.isFinite(ms) ? `${(ms / 1000).toFixed(2)} s` : "never");
   const perUser = runs[0].sharp.map((_, i) => secs(median(runs.map((r) => r.sharp[i]))));
   rows.push({
-    apollonius: on ? "on" : "off",
+    multi: on,
     "sharp per user": perUser.join(" / "),
     "disk reads": median(runs.map((r) => r.reads)),
     "cache hits": median(runs.map((r) => r.hits)),
