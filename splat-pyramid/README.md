@@ -76,4 +76,18 @@ Following [PLAN.md](PLAN.md):
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 
-Next: Apollonius (2-3 users), then the sandpile cache (memory).
+5. Apollonius (multiple users): built, no measured gain. Every user is a pursuer (position =
+   its view, speed = how fast it has been panning and zooming); the time to reach a unit is
+   distance over speed, and between two users the Apollonius circle splits who gets there
+   first. The server's shared packet cache evicts first what no user can reach within 2 s.
+   Incoming messages are limited per client (60/s, bursts of 120).
+
+   `bench/users.ts` runs 3 users at once (converging on one spot, or spread out). On
+   bills.jpg and on the 75k x 75k image the eviction policy performs the same as plain LRU:
+   at these sizes LRU already shares every unit among the users. Two other uses were tried
+   and dropped: warming the units several users converged on (it read more from disk, since
+   during a zoom most views are replaced before anything is sent), and prefetching each
+   user's predicted path on idle capacity (on the 75k image, 3 MB more per session and
+   views sharp later: 0.25 s against 0.19 s).
+
+Next: the sandpile cache (memory).

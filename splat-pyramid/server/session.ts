@@ -9,6 +9,7 @@ import { WIDTH_SPLAT, WIDTH_TILE, confetti, readSpx, tileParts, type Packets } f
 import { frame, repairSymbol } from "../shared/fec.ts";
 import type { PreparedImage } from "./image.ts";
 import { RunAndTumble } from "./tumble.ts";
+import type { Apollonius } from "./apollonius.ts";
 
 /** How long after its last packet a unit waits for the client's count, beyond a round trip. */
 const REPAIR_SLACK_MS = 250;
@@ -19,10 +20,19 @@ const REPAIR_SPARE = 1;
 
 /**
  * Packets of units, prepared once and shared by every session: the second viewer of a unit
- * costs no disk read and no packetising. Least recently used units go first over the budget.
+ * costs no disk read and no packetising.
+ *
+ * Over the budget, it evicts by demand when it knows it (Apollonius, server/apollonius.ts):
+ * first the units no connected user can reach within the horizon, least recently used first,
+ * and only then the rest. Without demand, least recently used first.
  */
 export class PacketCache {
   private units = new Map<string, Packets>();
+  private ids = new Map<string, { image: PreparedImage; unit: UnitId }>();
+  /** How many users can reach a unit soon; null = plain LRU. */
+  demand: ((image: PreparedImage, u: UnitId) => number) | null = null;
+  evictions = 0;
+  evictedWanted = 0;         // evictions of units someone could reach soon (only when forced)
   private framed = new WeakMap<Packets, Map<number, Uint8Array[]>>();
   private bytes = 0;
   hits = 0;
@@ -44,15 +54,41 @@ export class PacketCache {
     }
     this.misses++;
     const made = build(image, u);
-    const size = (p: Packets) => p.packets.reduce((s, b) => s + b.length, 0);
     this.units.set(key, made);
+    this.ids.set(key, { image, unit: u });
     this.bytes += size(made);
-    for (const [k, v] of this.units) {
-      if (this.bytes <= this.budget) break;
-      this.units.delete(k);
-      this.bytes -= size(v);
-    }
+    if (this.bytes > this.budget) this.evict(key);
     return made;
+  }
+
+  /** Whether a unit is ready without touching the disk. */
+  has(image: PreparedImage, u: UnitId): boolean {
+    return this.units.has(`${image.chart.name}/${unitKey(u)}`);
+  }
+
+  get held(): { units: number; bytes: number } {
+    return { units: this.units.size, bytes: this.bytes };
+  }
+
+  private evict(keep: string): void {
+    const drop = (k: string) => {
+      this.bytes -= size(this.units.get(k)!);
+      this.units.delete(k);
+      this.ids.delete(k);
+      this.evictions++;
+    };
+    // first pass: nobody is heading for it; second pass (only if still over): anything
+    for (const pass of this.demand ? [0, 1] : [1]) {
+      for (const k of [...this.units.keys()]) {
+        if (this.bytes <= this.budget) return;
+        if (k === keep) continue;
+        const id = this.ids.get(k)!;
+        const wanted = pass === 0 ? this.demand!(id.image, id.unit) : 0;
+        if (pass === 0 && wanted > 0) continue;
+        if (pass === 1 && this.demand && this.demand(id.image, id.unit) > 0) this.evictedWanted++;
+        drop(k);
+      }
+    }
   }
 
   /** A block's packets framed as erasure-code symbols, made once per unit and block. */
@@ -68,6 +104,8 @@ export class PacketCache {
     return out;
   }
 }
+
+const size = (p: Packets) => p.packets.reduce((s, b) => s + b.length, 0);
 
 function build(image: PreparedImage, u: UnitId): Packets {
   if (u.kind === KIND_SPLAT) return confetti(u.level, u.x, u.y, readSpx(image.splatPath(u.level, u.x, u.y)));
@@ -119,6 +157,9 @@ export class Session {
   cancelled = 0;
   topupPackets = 0;
   topupBytes = 0;
+  /** Apollonius, if the server uses it: this user as a pursuer. */
+  private apollo: Apollonius | null = null;
+  private user = "";
   reported = { packets: 0, bytes: 0 };
   /** How fast to send to this client; the server's pacing gives it `rate` bytes per second. */
   readonly rc: RunAndTumble;
@@ -136,6 +177,12 @@ export class Session {
     this.images = images;
     this.cache = cache;
     this.send = send;
+  }
+
+  /** Take part in Apollonius as `user`: report every view. */
+  attach(apollo: Apollonius, user: string): void {
+    this.apollo = apollo;
+    this.user = user;
   }
 
   onMessage(m: Message): void {
@@ -170,6 +217,7 @@ export class Session {
         this.wanted = new Set(all.map(unitKey));
         this.cancelled += this.queue.length;
         this.queue = this.plan(all);
+        this.apollo?.see(this.user, this.image, v);
         break;
       }
       case Type.REPORT: {
@@ -257,6 +305,9 @@ export class Session {
    *      comes before the splats' later chunks, which the tiles cover anyway
    *   4. the splats' later chunks
    *   5. a repair of any other unit still on screen
+   *
+   * (Prefetching the user's predicted path on idle capacity was tried with Apollonius and
+   * dropped: on the 75k image it sent 3 MB more per session and made views sharp later.)
    */
   private nextWork(): boolean {
     if (!this.image) return false;
