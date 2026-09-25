@@ -271,7 +271,8 @@ async function onTile(b: DataView, data: Uint8Array): Promise<void> {
 
 const imageName = new URLSearchParams(location.search).get("image") ?? "";
 let linkState = "connecting";
-const ws = new WebSocket(`ws://${location.host}/ws`);
+// wss when the page came over https (a tunnel, a proxy): browsers block ws from an https page
+const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
 ws.binaryType = "arraybuffer";
 ws.onopen = () => {
   linkState = "waiting for server";
