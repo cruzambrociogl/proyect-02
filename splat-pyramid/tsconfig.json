@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["shared", "server", "client"]
+  "include": ["shared", "server", "client", "bench"]
 }
