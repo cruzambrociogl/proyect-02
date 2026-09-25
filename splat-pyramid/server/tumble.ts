@@ -57,7 +57,10 @@ const REPORT_MS = 100;
 const MIN_JUDGE_PACKETS = 80;
 
 export const RATE_MIN = 32_000;            // bytes/s: 256 kbit/s
-export const RATE_START = 125_000;         // bytes/s: 1 Mbit/s
+export const RATE_START = 500_000;         // bytes/s: 4 Mbit/s. From 1 Mbit/s the first half
+                                           // second on a fast link showed a blurry opening
+                                           // view (21.8 dB against v1's 28.4); on a slower
+                                           // link the first run's exit catches the excess
 
 export class RunAndTumble {
   rate = RATE_START;

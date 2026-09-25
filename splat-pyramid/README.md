@@ -57,9 +57,9 @@ Following [PLAN.md](PLAN.md):
 
    | session / link | run-and-tumble (worst run) | best fixed rate, picked by hand per link |
    |---|---|---|
-   | jump / LAN | 0.18 s (0.18) | 0.10 s |
-   | jump / home | 0.53 s (0.57) | 0.59 s (0.65) |
-   | jump / mobile | 5.28 s (5.82) | 3.61 s (4.06) |
+   | jump / LAN | 0.16 s (0.16) | 0.10 s |
+   | jump / home | 0.57 s (0.59) | 0.59 s (0.65) |
+   | jump / mobile | 4.64 s (5.62) | 3.61 s (4.06) |
    | dive / LAN | 0.41 s (0.41) | 0.02 s |
    | dive / home | 0.73 s (0.86) | 0.24 s |
    | dive / mobile | 3.06 s (3.63) | 2.86 s |
@@ -125,18 +125,20 @@ What the user sees, PSNR against the original (dB):
 
 | link | version | open 0.5 s | open 2 s | 1:1 zoom 0.5 s | pan 0.5 s | whole image again 0.5 s |
 |---|---|---|---|---|---|---|
-| lan | v1 | **28.4** | 28.4 | 35.0 | 34.3 | 28.4 |
-| lan | v2 | 21.8 | **32.6** | 35.0 | 34.3 | **32.6** |
-| home | v1 | **28.4** | 28.4 | 35.0 | 34.3 | 28.4 |
-| home | v2 | 21.7 | **32.6** | 35.0 | 34.3 | **32.6** |
+| lan | v1 | 28.4 | 28.4 | 35.0 | 34.3 | 28.4 |
+| lan | v2 | **32.0** | **32.6** | 35.0 | 34.3 | **32.6** |
+| home | v1 | 28.4 | 28.4 | 35.0 | 34.3 | 28.4 |
+| home | v2 | **30.7** | **32.6** | 35.0 | 34.3 | **32.6** |
 | mobile | v1 | 15.1 | 28.4 | 28.7 | 29.1 | 28.4 |
-| mobile | v2 | **20.5** | **30.8** | **33.7** | **34.3** | **32.6** |
+| mobile | v2 | **20.5** | **29.5** | **32.8** | **34.3** | **32.6** |
 
 At 1:1 both show the same exact pixels once loaded (35.0 and 34.3 dB are the JPEG tiles
 themselves). Zoomed out, v2's splats are 4.2 dB closer to the original than v1's tiles. On
-the mobile link v2 is ahead at every moment: half a second after zooming in it shows 33.7 dB
-where v1 shows 28.7, and after the pan 34.3 against 29.1. Its weak spot is the first half
-second on fast links: the rate controller starts at 1 Mbit/s and has to climb.
+every link v2 is ahead or level at every moment: on the mobile link, half a second after
+zooming in it shows 32.8 dB where v1 shows 28.7, and after the pan 34.3 against 29.1. (v2's
+rate controller used to start at 1 Mbit/s, which left its opening view blurry for the first
+half second on fast links, 21.8 dB; it now starts at 4 Mbit/s. v2 rows are from after that
+change, v1 rows from the same session as before.)
 
 The browser's side:
 

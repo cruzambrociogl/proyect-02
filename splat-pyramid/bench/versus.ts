@@ -19,7 +19,8 @@
 //
 // The link is emulated on the server's side only, as v1 does it.
 //
-//   node bench/versus.ts [--profiles lan,home,mobile] [--repeat 3] [--out bench/out/versus]
+//   node bench/versus.ts [--profiles lan,home,mobile] [--versions v1,v2] [--repeat 3]
+//                        [--out bench/out/versus]
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -30,6 +31,7 @@ import { parseArgs } from "node:util";
 const { values: args } = parseArgs({
   options: {
     profiles: { type: "string", default: "lan,home,mobile" },
+    versions: { type: "string", default: "v1,v2" },
     repeat: { type: "string", default: "3" },
     image: { type: "string", default: "holbein_8000.jpg" },
     out: { type: "string", default: join(import.meta.dirname, "out", "versus") },
@@ -205,7 +207,7 @@ async function session(version: "v1" | "v2", profile: string, run: number) {
 
 rmSync(args.out, { recursive: true, force: true });
 for (const profile of args.profiles.split(",")) {
-  for (const version of ["v1", "v2"] as const) {
+  for (const version of args.versions.split(",") as ("v1" | "v2")[]) {
     for (let i = 0; i < Number(args.repeat); i++) {
       const r = await session(version, profile, i);
       console.log(`${profile} ${version} run ${i}: received ${(r.bytes / 2 ** 20).toFixed(2)} MB, ` +
