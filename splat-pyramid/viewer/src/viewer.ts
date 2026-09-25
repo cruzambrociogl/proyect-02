@@ -15,6 +15,15 @@ const NORMALIZED = 0;
 const KIND_SPLAT = 0, KIND_TILE = 1;
 const RECORD = 11, CONFETTI_HEAD = 29;          // must match shared/units.ts
 
+/**
+ * The canvas is drawn at CSS pixels, one per layout pixel whatever the screen's density, and
+ * the browser scales it up on a high-density (Retina) screen. Drawn at device pixels, a 2x
+ * screen took 4x everything: the two full-screen half-float targets alone were 93 MB of GPU
+ * memory at 3438 x 1690, and one screenful of tiles could need about 65 MB, more than the
+ * whole cache budget, so the cache evicted what the next frame needed and fetched it again
+ * (104 MB received for an 8 MB image). The cost: on such a screen, 1:1 is 2x magnified.
+ */
+const PIXEL_RATIO = 1;
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
  * Everything the viewer holds, blobs and tiles together: the sandpile cache (sandpile.ts)
@@ -347,7 +356,7 @@ function fit(): void {
   cam.cx = M.width / 2;
   cam.cy = M.height / 2;
   const q = new URLSearchParams(location.hash.slice(1));
-  if (q.has("z")) cam.z = Number(q.get("z")) * (window.devicePixelRatio || 1);
+  if (q.has("z")) cam.z = Number(q.get("z")) * PIXEL_RATIO;
   if (q.has("x")) cam.cx = Number(q.get("x"));
   if (q.has("y")) cam.cy = Number(q.get("y"));
   clamp();
@@ -383,8 +392,7 @@ function gridOf(L: number): [number, number] {
 
 function frame(): void {
   requestAnimationFrame(frame);
-  const dpr = window.devicePixelRatio || 1;
-  const cw = Math.round(canvas.clientWidth * dpr), ch = Math.round(canvas.clientHeight * dpr);
+  const cw = Math.round(canvas.clientWidth * PIXEL_RATIO), ch = Math.round(canvas.clientHeight * PIXEL_RATIO);
   if (canvas.width !== cw || canvas.height !== ch) {
     canvas.width = cw;
     canvas.height = ch;
@@ -530,8 +538,7 @@ function frame(): void {
 
 function zoomAt(px: number, py: number, factor: number): void {
   if (!M) return;
-  const dpr = window.devicePixelRatio || 1;
-  const sx = px * dpr, sy = py * dpr;
+  const sx = px * PIXEL_RATIO, sy = py * PIXEL_RATIO;
   const X = (sx - canvas.width / 2) / cam.z + cam.cx, Y = (sy - canvas.height / 2) / cam.z + cam.cy;
   cam.z *= factor;
   const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
@@ -558,7 +565,7 @@ canvas.addEventListener("pointermove", (e) => {
   const prev = pointers.get(e.pointerId);
   if (!prev) return;
   pointers.set(e.pointerId, [e.offsetX, e.offsetY]);
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = PIXEL_RATIO;
   if (pointers.size === 1) {
     cam.cx -= ((e.offsetX - prev[0]) * dpr) / cam.z;
     cam.cy -= ((e.offsetY - prev[1]) * dpr) / cam.z;
@@ -587,8 +594,14 @@ window.addEventListener("keydown", (e) => {
 
 for (const id of ["detail", "tiles", "exact"] as const) {
   const el = document.getElementById(id) as HTMLInputElement;
-  el.addEventListener("input", () => { ui[id] = el.checked; dirty = true; });
+  el.addEventListener("input", () => { ui[id] = el.checked; applyCanvasScaling(); dirty = true; });
 }
+
+/** Past 1:1 on a high-density screen the browser scales the canvas up: no smoothing either. */
+function applyCanvasScaling(): void {
+  canvas.style.imageRendering = ui.exact ? "pixelated" : "auto";
+}
+applyCanvasScaling();
 
 requestAnimationFrame(frame);
 

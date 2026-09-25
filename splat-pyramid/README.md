@@ -120,6 +120,14 @@ reordered one no longer leaves the viewer waiting.
    and 31.9 MB through 643 evictions. (The two full-screen half-float targets the viewer
    composes into are on top, constant: about 11 MB each at 1600 x 900.)
 
+   The canvas is drawn at CSS pixels and the browser scales it up on a high-density screen.
+   Drawn at device pixels, a 2x (Retina) screen took 4x everything: the two targets were
+   93 MB of GPU memory at 3438 x 1690, and one screenful of tiles could need more than the
+   whole budget, so the cache evicted what the next frame needed and fetched it again (a
+   test session received 104.8 MB with 11,293 evictions). At CSS pixels, 8 zooms in and out
+   on an emulated 2x screen received 8.5 MB with 325 evictions, and the targets take 23 MB.
+   The cost: on such a screen 1:1 is 2x magnified (drawn pixelated when "exact pixels" is on).
+
    Also cut: blobs are held on the GPU as their raw 11-byte records, decoded in the vertex
    shader, instead of 32 bytes of floats; tiles have no mipmaps; and a view draws the coarser
    level from 1.68 image pixels per screen pixel on instead of 2 (at most 1.19x
