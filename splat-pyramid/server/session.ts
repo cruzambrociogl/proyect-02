@@ -245,7 +245,11 @@ export class Session {
     this.lastHeard = Date.now();
     switch (m.type) {
       case Type.HELLO:
+        // a new page: its views count from 1 again. Keeping the old epoch made the server
+        // ignore every view of a page that connected before the last one said BYE (a black
+        // canvas until reloaded)
         this.reset();
+        this.epoch = 0;
         this.send(encode(Type.WELCOME, 0));
         break;
       case Type.OPEN: {
