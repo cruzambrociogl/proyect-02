@@ -32,6 +32,13 @@ function pixelRatio(): number {
 }
 /** The ratio the canvas actually has now (input positions and camera use this). */
 const canvasRatio = () => (canvas.clientWidth ? canvas.width / canvas.clientWidth : 1);
+/**
+ * The closest zoom: one image pixel over this many screen (CSS) pixels, so it looks the same
+ * on a phone, a laptop and a large monitor whatever the canvas's pixel budget. Past 1:1 there
+ * is no new data, only magnification, so this costs nothing on the network.
+ */
+const MAX_MAGNIFY = 8;
+const maxZoom = () => MAX_MAGNIFY * canvasRatio();       // in canvas pixels per image pixel
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
  * Everything the viewer holds, blobs and tiles together: the forgetting-curve cache (forgetting.ts)
@@ -462,14 +469,14 @@ function fit(): void {
 }
 
 /**
- * Keep the camera on the image (the same rule as v1): zoom between 4x past 1:1 and the whole
- * image, and the centre where the image covers the screen, or centred on an axis where the
+ * Keep the camera on the image: zoom between MAX_MAGNIFY screen pixels per image pixel and
+ * the whole image, and the centre where the image covers the screen, or centred on an axis where the
  * image is smaller than the screen. Nobody wants to pan into empty space.
  */
 function clamp(): void {
   if (!M) return;
   const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
-  const scale = Math.min(Math.max(1 / cam.z, 0.25), maxScale);
+  const scale = Math.min(Math.max(1 / cam.z, 1 / maxZoom()), maxScale);
   cam.z = 1 / scale;
   const halfW = (canvas.width * scale) / 2, halfH = (canvas.height * scale) / 2;
   cam.cx = halfW * 2 >= M.width ? M.width / 2 : Math.min(Math.max(cam.cx, halfW), M.width - halfW);
@@ -651,7 +658,7 @@ function zoomAt(px: number, py: number, factor: number): void {
   const X = (sx - canvas.width / 2) / cam.z + cam.cx, Y = (sy - canvas.height / 2) / cam.z + cam.cy;
   cam.z *= factor;
   const maxScale = Math.max(M.width / canvas.width, M.height / canvas.height);
-  cam.z = Math.min(4, Math.max(1 / maxScale, cam.z));
+  cam.z = Math.min(maxZoom(), Math.max(1 / maxScale, cam.z));
   cam.cx = X - (sx - canvas.width / 2) / cam.z;
   cam.cy = Y - (sy - canvas.height / 2) / cam.z;
   clamp();
