@@ -2,17 +2,20 @@
 
 import { readFileSync } from "node:fs";
 import {
-  Type, KIND_SPLAT, KIND_TILE, decodeReport, decodeView, encode, unitKey,
+  Type, KIND_SPLAT, KIND_TILE, decodeReport, decodeView, encode, encodeRepair, unitKey,
   type Message, type UnitId, type View,
 } from "../shared/wire.ts";
-import { confetti, readSpx, tileParts, type Packets } from "../shared/units.ts";
+import { WIDTH_SPLAT, WIDTH_TILE, confetti, readSpx, tileParts, type Packets } from "../shared/units.ts";
+import { frame, repairSymbol } from "../shared/fec.ts";
 import type { PreparedImage } from "./image.ts";
 import { RunAndTumble } from "./tumble.ts";
 
-/** How long a unit waits after its last packet before an idle link may send it again. */
-export const TOPUP_WAIT_MS = 400;
-/** Resends of one unit, at most, while it stays on screen (the base unit has no limit). */
-const MAX_TOPUPS = 4;
+/** How long after its last packet a unit waits for the client's count, beyond a round trip. */
+const REPAIR_SLACK_MS = 250;
+/** Repair rounds of one unit, at most, while it stays on screen (the base unit has no limit). */
+const MAX_TOPUPS = 6;
+/** Repair symbols sent beyond what a block is short, so one lost repair costs no round trip. */
+const REPAIR_SPARE = 1;
 
 /**
  * Packets of units, prepared once and shared by every session: the second viewer of a unit
@@ -20,6 +23,7 @@ const MAX_TOPUPS = 4;
  */
 export class PacketCache {
   private units = new Map<string, Packets>();
+  private framed = new WeakMap<Packets, Map<number, Uint8Array[]>>();
   private bytes = 0;
   hits = 0;
   misses = 0;
@@ -50,12 +54,25 @@ export class PacketCache {
     }
     return made;
   }
+
+  /** A block's packets framed as erasure-code symbols, made once per unit and block. */
+  symbols(p: Packets, block: number, isTile: boolean): Uint8Array[] {
+    let byBlock = this.framed.get(p);
+    if (!byBlock) this.framed.set(p, (byBlock = new Map()));
+    let out = byBlock.get(block);
+    if (!out) {
+      const b = p.blocks[block], width = isTile ? WIDTH_TILE : WIDTH_SPLAT;
+      out = p.packets.slice(b.start, b.start + b.k).map((q) => frame(q, width));
+      byBlock.set(block, out);
+    }
+    return out;
+  }
 }
 
 function build(image: PreparedImage, u: UnitId): Packets {
   if (u.kind === KIND_SPLAT) return confetti(u.level, u.x, u.y, readSpx(image.splatPath(u.level, u.x, u.y)));
   const file = image.tileFile(u.level, u.x, u.y);
-  if (!file) return { packets: [], ends: [0] };
+  if (!file) return { packets: [], ends: [0], blocks: [] };
   return tileParts(u.level, u.x, u.y, file.format, readFileSync(file.path));
 }
 
@@ -70,12 +87,13 @@ interface Job {
   chunk: number;
 }
 
-/** What a unit has been sent, and how much of that arrived. */
+/** What a unit has been sent, and what the client says it holds of it. */
 interface UnitState {
   id: UnitId;
   sentUpTo: number;      // packets [0, sentUpTo) have been sent at least once
   chunksSent: number;
-  got: number;           // the client's count
+  held: Map<number, number>;   // per block of the erasure code: independent symbols held
+  nextSymbol: Map<number, number>;   // per block: the next repair symbol's number
   lastSend: number;
   topups: number;
 }
@@ -90,7 +108,7 @@ export class Session {
   private queue: Job[] = [];
   private current: Buffer[] = [];        // packets being sent
   private currentAt = 0;
-  private currentType: typeof Type.CONFETTI | typeof Type.TILEPART = Type.CONFETTI;
+  private currentType: typeof Type.CONFETTI | typeof Type.TILEPART | typeof Type.REPAIR = Type.CONFETTI;
   private currentState: UnitState | null = null;
   private repairing = false;
   // counters, for STATS
@@ -158,9 +176,9 @@ export class Session {
         const r = decodeReport(m.payload);
         this.reported = { packets: r.packets, bytes: r.bytes };
         this.rc.onReport(r);
-        for (const c of r.units) {
+        for (const c of r.blocks) {
           const s = this.units.get(unitKey(c));
-          if (s) s.got = Math.max(s.got, c.got);
+          if (s) s.held.set(c.block, Math.max(s.held.get(c.block) ?? 0, c.got));
         }
         break;
       }
@@ -217,7 +235,7 @@ export class Session {
       const msg = encode(this.currentType, this.epoch, payload);
       this.send(msg);
       spent += msg.length;
-      this.rc.sent();
+      this.rc.sent(msg.length);
       this.packetsSent++;
       this.bytesSent += msg.length;
       if (this.repairing) {
@@ -260,7 +278,7 @@ export class Session {
       const key = unitKey(job.id);
       let s = this.units.get(key);
       if (!s) {
-        s = { id: job.id, sentUpTo: 0, chunksSent: 0, got: 0, lastSend: now, topups: 0 };
+        s = { id: job.id, sentUpTo: 0, chunksSent: 0, held: new Map(), nextSymbol: new Map(), lastSend: now, topups: 0 };
         this.units.set(key, s);
       }
       if (s.chunksSent > job.chunk) continue;
@@ -276,18 +294,46 @@ export class Session {
     return false;
   }
 
-  /** Send again everything the unit was sent; the client drops what it already has. */
+  /** How many symbols the unit's sent blocks are short, by the client's last count. */
+  private deficit(s: UnitState): number {
+    const p = this.cache.packets(this.image!, s.id);
+    let short = 0;
+    p.blocks.forEach((b, i) => {
+      if (b.start + b.k <= s.sentUpTo) short += Math.max(0, b.k - (s.held.get(i) ?? 0));
+    });
+    return short;
+  }
+
+  /**
+   * Repair a unit: for every block the client is short of, that many fresh repair symbols
+   * (plus REPAIR_SPARE). Each is a new mixture of the whole block, useful whichever packets
+   * were lost, so nothing is ever sent twice and nothing is wasted on what already arrived.
+   */
   private repair(s: UnitState): boolean {
     s.topups++;
     const p = this.cache.packets(this.image!, s.id);
-    this.start(s.id, p.packets.slice(0, s.sentUpTo), s, true);
-    return true;
+    const isTile = s.id.kind === KIND_TILE;
+    const out: Buffer[] = [];
+    p.blocks.forEach((b, i) => {
+      if (b.start + b.k > s.sentUpTo) return;
+      const short = b.k - (s.held.get(i) ?? 0);
+      if (short <= 0) return;
+      const framed = this.cache.symbols(p, i, isTile);
+      let next = s.nextSymbol.get(i) ?? b.k;
+      for (let j = 0; j < short + REPAIR_SPARE; j++, next++) {
+        out.push(encodeRepair({ ...s.id, block: i, k: b.k, width: framed[0].length, index: next },
+                              repairSymbol(framed, next)));
+      }
+      s.nextSymbol.set(i, next);
+    });
+    this.start(s.id, out, s, true);
+    return out.length > 0;
   }
 
   private start(id: UnitId, packets: Buffer[], s: UnitState, repairing: boolean): void {
     this.current = packets;
     this.currentAt = 0;
-    this.currentType = id.kind === KIND_SPLAT ? Type.CONFETTI : Type.TILEPART;
+    this.currentType = repairing ? Type.REPAIR : id.kind === KIND_SPLAT ? Type.CONFETTI : Type.TILEPART;
     this.currentState = s;
     this.repairing = repairing;
   }
@@ -297,8 +343,9 @@ export class Session {
   }
 
   private repairDue(key: string, s: UnitState, now: number): boolean {
-    return s.got < s.sentUpTo && now - s.lastSend > TOPUP_WAIT_MS
-      && (this.isBase(s.id) || (s.topups < MAX_TOPUPS && this.wanted.has(key)));
+    return now - s.lastSend > this.rc.srtt + REPAIR_SLACK_MS
+      && (this.isBase(s.id) || (s.topups < MAX_TOPUPS && this.wanted.has(key)))
+      && this.deficit(s) > 0;
   }
 
   /** Nothing to send now: no packets left, no work queued, nothing due for repair. */

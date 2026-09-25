@@ -11,7 +11,7 @@ const SIGMA_MIN = 0.4, SIGMA_MAX = 48.0, AMP_MIN = 1e-3, AMP_MAX = 16.0, POS_PAD
 const CUTOFF = 3.0, MIN_REACH = 1.5, EPS = 1e-4;
 const NORMALIZED = 0;
 const KIND_SPLAT = 0, KIND_TILE = 1;
-const RECORD = 11, CONFETTI_HEAD = 24;
+const RECORD = 11, CONFETTI_HEAD = 29;          // must match shared/units.ts
 const FLOATS = 8;                           // x, y, sx, sy, theta, r, g, b
 
 const BLOB_BUDGET = 3_000_000;

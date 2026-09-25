@@ -33,6 +33,7 @@ export const Type = {
   STATS: 9,      // server -> client: what the session is doing, JSON
   FAULT: 10,     // server -> client: an error, text
   BYE: 11,       // either way: the session is over
+  REPAIR: 12,    // server -> client: a mixture of one block's packets (fec.ts)
 } as const;
 export type TypeCode = (typeof Type)[keyof typeof Type];
 
@@ -132,8 +133,9 @@ export function decodeView(b: Buffer): View {
 /**
  * REPORT: what arrived. Also the session's keepalive, and the rate controller's senses.
  *
- * Confetti feedback is one number per unit: how many of its packets arrived. Never a list
- * of which were lost, never a per-packet acknowledgement.
+ * Loss feedback is one number per block of a unit (see fec.ts): how many independent symbols
+ * of it the client holds. Never a list of which were lost, never a per-packet
+ * acknowledgement; the server sends as many repair symbols as the count is short.
  *
  *   0  u32  packets received so far     4  u32  bytes received so far
  *   8  u32  bytes received since the last report
@@ -141,11 +143,13 @@ export function decodeView(b: Buffer): View {
  *  14  i32  smallest one-way delay seen since the last report, ms (receive clock minus the
  *           sender's "sent at": only its changes mean anything); INT32_MIN if none
  *  18  u32  the newest "sent at" received      22  u16  ms held before this report (for RTT)
- *  24  u16  unit entries, then per unit: kind u8, level u8, x u32, y u32, got u16, total u16
+ *  24  u16  block entries, then per block: kind u8, level u8, x u32, y u32, block u8,
+ *           got u16 (independent symbols held), k u16 (symbols the block needs)
  */
-export interface UnitCount extends UnitId {
+export interface BlockCount extends UnitId {
+  block: number;
   got: number;
-  total: number;
+  k: number;
 }
 
 export interface Report {
@@ -156,17 +160,17 @@ export interface Report {
   owdMin: number | null;
   echo: number;
   holdMs: number;
-  units: UnitCount[];
+  blocks: BlockCount[];
 }
 
 const REPORT_FIXED = 26;
 const NO_DELAY = -0x80000000;
-const COUNT_BYTES = 14;
-/** How many unit counts fit in one REPORT datagram. */
+const COUNT_BYTES = 15;
+/** How many block counts fit in one REPORT datagram. */
 export const MAX_COUNTS = Math.floor((MAX_DATAGRAM - HEADER - REPORT_FIXED) / COUNT_BYTES);
 
 export function encodeReport(r: Report): Buffer {
-  const units = r.units.slice(0, MAX_COUNTS);
+  const units = r.blocks.slice(0, MAX_COUNTS);
   const b = Buffer.alloc(REPORT_FIXED + units.length * COUNT_BYTES);
   b.writeUInt32BE(r.packets >>> 0, 0);
   b.writeUInt32BE(r.bytes >>> 0, 4);
@@ -182,22 +186,59 @@ export function encodeReport(r: Report): Buffer {
     b[at + 1] = u.level;
     b.writeUInt32BE(u.x, at + 2);
     b.writeUInt32BE(u.y, at + 6);
-    b.writeUInt16BE(Math.min(65535, u.got), at + 10);
-    b.writeUInt16BE(Math.min(65535, u.total), at + 12);
+    b[at + 10] = u.block;
+    b.writeUInt16BE(Math.min(65535, u.got), at + 11);
+    b.writeUInt16BE(Math.min(65535, u.k), at + 13);
   });
   return b;
 }
 
 export function decodeReport(b: Buffer): Report {
   const n = b.length >= REPORT_FIXED ? b.readUInt16BE(24) : 0;
-  const units: UnitCount[] = [];
+  const blocks: BlockCount[] = [];
   for (let i = 0; i < n; i++) {
     const at = REPORT_FIXED + i * COUNT_BYTES;
-    units.push({ kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6),
-                 got: b.readUInt16BE(at + 10), total: b.readUInt16BE(at + 12) });
+    blocks.push({ kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6),
+                  block: b[at + 10], got: b.readUInt16BE(at + 11), k: b.readUInt16BE(at + 13) });
   }
   const owd = b.readInt32BE(14);
   return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4), intervalBytes: b.readUInt32BE(8),
            intervalMs: b.readUInt16BE(12), owdMin: owd === NO_DELAY ? null : owd,
-           echo: b.readUInt32BE(18), holdMs: b.readUInt16BE(22), units };
+           echo: b.readUInt32BE(18), holdMs: b.readUInt16BE(22), blocks };
+}
+
+/**
+ * REPAIR: one repair symbol (fec.ts) of one block of a unit.
+ *    0  u8 kind   1  u8 level   2  u32 x   6  u32 y   10  u8 block   11  u16 k
+ *   13  u16 symbol width         15  u16 symbol index (>= k)          17  symbol
+ */
+export const REPAIR_HEAD = 17;
+
+export interface RepairHead extends UnitId {
+  block: number;
+  k: number;
+  width: number;
+  index: number;
+}
+
+export function encodeRepair(h: RepairHead, symbol: Uint8Array): Buffer {
+  const b = Buffer.alloc(REPAIR_HEAD + symbol.length);
+  b[0] = h.kind;
+  b[1] = h.level;
+  b.writeUInt32BE(h.x, 2);
+  b.writeUInt32BE(h.y, 6);
+  b[10] = h.block;
+  b.writeUInt16BE(h.k, 11);
+  b.writeUInt16BE(h.width, 13);
+  b.writeUInt16BE(h.index, 15);
+  b.set(symbol, REPAIR_HEAD);
+  return b;
+}
+
+export function decodeRepair(b: Buffer): { head: RepairHead; symbol: Buffer } {
+  return {
+    head: { kind: b[0], level: b[1], x: b.readUInt32BE(2), y: b.readUInt32BE(6), block: b[10],
+            k: b.readUInt16BE(11), width: b.readUInt16BE(13), index: b.readUInt16BE(15) },
+    symbol: b.subarray(REPAIR_HEAD),
+  };
 }
