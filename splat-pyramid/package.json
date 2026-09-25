@@ -1,0 +1,20 @@
+{
+  "name": "splat-pyramid",
+  "private": true,
+  "type": "module",
+  "description": "Gigapixel viewer: splat pyramid plus exact tiles, over our own protocol on UDP",
+  "scripts": {
+    "server": "node server/main.ts",
+    "client": "node client/main.ts",
+    "build": "tsc -p viewer",
+    "check": "tsc -p . && tsc -p viewer --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^7.0.2"
+  }
+}
