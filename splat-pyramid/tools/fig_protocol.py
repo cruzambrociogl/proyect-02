@@ -45,6 +45,8 @@ ROWS = [
      "full, the least remembered per byte goes. A second level of 48 MB keeps evicted data compressed.", False),
 ]
 
+# Spanish: algorithm names and the technical English terms (splat, chunk, tile, blob, cache,
+# upload, run-and-tumble...) stay in English; only the prose around them is translated.
 SPANISH = {
     "The protocol's algorithms": "Los algoritmos del protocolo",
     "From the server to the client: each step a piece of data meets on its way to the screen.":
@@ -52,63 +54,62 @@ SPANISH = {
     "step": "paso", "algorithm": "algoritmo", "what it does in the project": "qué hace en el proyecto",
     "main algorithm": "algoritmo principal", "server": "servidor", "client": "cliente",
     "1. Decide what to send": "1. Decidir qué enviar",
-    "Job plan with epochs (own)": "Plan de trabajo con épocas (propio)",
+    "Job plan with epochs (own)": "Job plan with epochs (propio)",
     "Each VIEW builds a plan: splat chunks first, then tiles. A new VIEW cancels the old plan. "
     "The base unit is always repaired first, and tile repairs come before background chunks.":
-        "Cada VIEW arma un plan: primero los bloques de splats, luego las teselas. Un VIEW nuevo cancela "
-        "el plan anterior. La unidad base siempre se repara primero, y la reparación de teselas va antes "
-        "que los bloques de fondo.",
+        "Cada VIEW arma un plan: primero los chunks de splats, luego los tiles. Un VIEW nuevo cancela el "
+        "plan anterior. La unidad base siempre se repara primero, y las reparaciones de tiles van antes "
+        "que los chunks de fondo.",
     "2. Serve several users": "2. Atender a varios usuarios",
-    "Physarum": "Physarum (moho mucilaginoso)",
     "Each cached unit is a node whose conductance is the data flowing out of it to anyone; the cache "
     "evicts the least conductance per byte. Each user is a tube that grows with useful flow (data sent "
     "whole while still wanted); when the server's upload is the limit, it is shared by tube size.":
-        "Cada unidad en caché es un nodo cuya conductancia es el flujo de datos que sale de ella hacia "
-        "cualquiera; la caché desaloja la de menor conductancia por byte. Cada usuario es un tubo que crece "
-        "con el flujo útil (datos enviados completos mientras aún se querían); cuando la subida del "
+        "Cada unidad en cache es un nodo cuya conductancia es el flujo de datos que sale de ella hacia "
+        "cualquiera; la cache desaloja la de menor conductancia por byte. Cada usuario es un tubo que crece "
+        "con el flujo útil (datos enviados completos mientras aún se querían); cuando el upload del "
         "servidor es el límite, se reparte según el tamaño del tubo.",
     "3. Not look like a DDoS": "3. No parecer un DDoS",
-    "Per-client message limit": "Límite de mensajes por cliente",
-    "60 messages/s per client, bursts of 120.": "60 mensajes/s por cliente, ráfagas de 120.",
+    "60 messages/s per client, bursts of 120.": "60 mensajes/s por cliente, bursts de 120.",
     "4. How fast to send": "4. Qué tan rápido enviar",
     "Run-and-tumble (own, main)": "Run-and-tumble (propio, principal)",
     "Like a bacterium: it keeps \"running\" at a rate while the score improves and \"tumbles\" to a new "
     "rate when it gets worse. Score = sent rate × e^(−queue delay / 80 ms). It starts at 4 Mbit/s "
     "and cuts hard if delay passes 150 ms.":
-        "Como una bacteria: sigue \"nadando\" a una tasa mientras el puntaje mejora y \"da un tumbo\" hacia "
-        "una tasa nueva cuando empeora. Puntaje = tasa enviada × e^(−retardo de cola / 80 ms). Empieza en "
-        "4 Mbit/s y recorta fuerte si el retardo pasa de 150 ms.",
+        "Como una bacteria: sigue en \"run\" a una tasa mientras el score mejora y hace \"tumble\" hacia "
+        "una tasa nueva cuando empeora. Score = tasa enviada × e^(−queue delay / 80 ms). Empieza en "
+        "4 Mbit/s y recorta fuerte si el delay pasa de 150 ms.",
     "5. Spread the packets out": "5. Espaciar los paquetes",
-    "Token-bucket pacing with overdraft": "Ritmo por cubeta de fichas, con sobregiro",
     "Sends at the rate the tumbler chose, with no bursts.":
-        "Envía a la tasa que eligió el run-and-tumble, sin ráfagas.",
+        "Envía a la tasa que eligió el run-and-tumble, sin bursts.",
     "6. Splats on the wire": "6. Splats en la red",
-    "Confetti delivery (own, main)": "Entrega confeti (propio, principal)",
+    "Confetti delivery (own, main)": "Confetti delivery (propio, principal)",
     "A unit's blobs are dealt across its packets like cards. Any subset of packets still draws the "
     "whole unit, only softer, so a lost packet leaves blur, not a hole.":
-        "Las manchas de una unidad se reparten entre sus paquetes como cartas. Cualquier subconjunto de "
-        "paquetes dibuja la unidad completa, solo más suave: un paquete perdido deja desenfoque, no un hueco.",
+        "Los blobs de una unidad se reparten entre sus paquetes como cartas. Cualquier subconjunto de "
+        "paquetes dibuja la unidad completa, solo más suave: un paquete perdido deja blur, no un hueco.",
     "7. Repair losses": "7. Reparar pérdidas",
-    "Rateless erasure code over GF(256) (own, from v1)": "Código de borrado sin tasa sobre GF(256) (propio, de v1)",
+    "Rateless erasure code over GF(256) (own, from v1)": "Rateless erasure code over GF(256) (propio, de v1)",
     "The client only reports how many packets arrived per block. The server sends new combined "
     "packets until the count is enough, and never resends a specific packet.":
         "El cliente solo reporta cuántos paquetes llegaron por bloque. El servidor envía paquetes "
         "combinados nuevos hasta que la cuenta alcanza, y nunca reenvía un paquete específico.",
-    "8. Client feedback": "8. Retroalimentación del cliente",
-    "Count-only REPORT, plus retries of HELLO/OPEN/VIEW": "REPORT solo con cuentas, más reintentos de HELLO/OPEN/VIEW",
+    "8. Client feedback": "8. Feedback del cliente",
     "Received counts, bytes and one-way delay (from the header's sentAt) are what feed the tumbler.":
-        "Las cuentas recibidas, los bytes y el retardo de ida (del sentAt de la cabecera) alimentan al "
+        "Las cuentas recibidas, los bytes y el one-way delay (del sentAt del header) alimentan al "
         "run-and-tumble.",
     "9. Memory in the browser": "9. Memoria en el navegador",
-    "Forgetting curve (Ebbinghaus)": "Curva del olvido (Ebbinghaus)",
     "Each cached unit is a memory that fades unless it's on screen. Coming back after time away "
     "makes it last longer, and coarse levels start out lasting longer. When the 32 MB budget is "
     "full, the least remembered per byte goes. A second level of 48 MB keeps evicted data compressed.":
-        "Cada unidad en caché es un recuerdo que se desvanece si no está en pantalla. Volver a ella tras "
-        "un tiempo hace que dure más, y los niveles gruesos empiezan durando más. Cuando el presupuesto de "
+        "Cada unidad en cache es un recuerdo que se desvanece si no está en pantalla. Volver a ella tras "
+        "un tiempo hace que dure más, y los niveles gruesos empiezan durando más. Cuando el budget de "
         "32 MB se llena, sale la menos recordada por byte. Un segundo nivel de 48 MB guarda comprimido lo "
         "desalojado.",
 }
+# names that stay as they are
+for name in ("Physarum", "Per-client message limit", "Token-bucket pacing with overdraft",
+             "Count-only REPORT, plus retries of HELLO/OPEN/VIEW", "Forgetting curve (Ebbinghaus)"):
+    SPANISH[name] = name
 
 
 def main():
