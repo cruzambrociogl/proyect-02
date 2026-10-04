@@ -2,13 +2,13 @@
 
 import { readFileSync } from "node:fs";
 import {
-  Type, KIND_SPLAT, KIND_TILE, decodeReport, decodeView, encode, encodeRepair, unitKey,
+  HEADER, MAX_DATAGRAM, Type, KIND_SPLAT, KIND_TILE, clockMs, decodeAck, decodeReport, decodeView, encode, encodeRepair, unitKey,
   type Message, type UnitId, type View,
 } from "../shared/wire.ts";
 import { WIDTH_SPLAT, WIDTH_TILE, confetti, readSpx, tileParts, type Packets } from "../shared/units.ts";
 import { frame, repairSymbol } from "../shared/fec.ts";
 import type { PreparedImage } from "./image.ts";
-import { RunAndTumble } from "./tumble.ts";
+import { IDLE_RESTART_MS, RunAndTumble } from "./tumble.ts";
 import type { Apollonius } from "./apollonius.ts";
 import type { Physarum } from "./physarum.ts";
 
@@ -136,6 +136,16 @@ function build(image: PreparedImage, u: UnitId): Packets {
   return tileParts(u.level, u.x, u.y, file.format, readFileSync(file.path));
 }
 
+/** How the sending is controlled; the defaults are the protocol, the rest for comparison. */
+export interface SendOptions {
+  window: boolean;        // false: no sliding window, rate only (--window off)
+  slowStart: boolean;     // false: open at a fixed 4 Mbit/s (--start fixed)
+}
+export const DEFAULT_SEND: SendOptions = { window: true, slowStart: true };
+
+const MIN_RTO_MS = 200;    // a packet unacknowledged this long (or 3 round trips) is lost
+const MAX_BACKOFF = 64;    // timeouts with no ACK between them double the timeout, up to this
+
 export interface Peer {
   address: string;
   port: number;
@@ -186,6 +196,16 @@ export class Session {
   private epochBytes = new Map<string, number>();   // bytes sent per unit since last judged
   private user = "";
   reported = { packets: 0, bytes: 0 };
+  // the sliding window: data packets sent and not yet acknowledged, oldest first
+  private seqNext = 1;
+  private flight: { seq: number; bytes: number; at: number }[] = [];
+  private flightBytes = 0;
+  rwnd = Infinity;                       // the receiver's window, from its last ACK
+  private backoff = 1;                   // RTO multiplier: doubles per timeout without an ACK
+  private silent = false;                // timed out with no ACK since: one packet at a time
+  private lastDataAt = 0;
+  acked = { seq: 0, packets: 0, lost: 0, expired: 0, windowStalls: 0, zeroWindow: 0 };
+  private readonly opts: SendOptions;
   /** How fast to send to this client; the server's pacing gives it `rate` bytes per second. */
   readonly rc: RunAndTumble;
   tokens = 0;
@@ -196,8 +216,9 @@ export class Session {
   private cache: PacketCache;
 
   constructor(peer: Peer, images: Map<string, PreparedImage>, cache: PacketCache,
-              send: (msg: Buffer) => void, maxRate: number) {
-    this.rc = new RunAndTumble(maxRate);
+              send: (msg: Buffer) => void, maxRate: number, opts: SendOptions = DEFAULT_SEND) {
+    this.opts = opts;
+    this.rc = new RunAndTumble(maxRate, opts.slowStart);
     this.peer = peer;
     this.images = images;
     this.cache = cache;
@@ -247,9 +268,13 @@ export class Session {
       case Type.HELLO:
         // a new page: its views count from 1 again. Keeping the old epoch made the server
         // ignore every view of a page that connected before the last one said BYE (a black
-        // canvas until reloaded)
+        // canvas until reloaded). Sequence numbers start again too: the client counts anew
         this.reset();
         this.epoch = 0;
+        this.seqNext = 1;
+        this.flight = [];
+        this.flightBytes = 0;
+        this.rwnd = Infinity;
         this.send(encode(Type.WELCOME, 0));
         break;
       case Type.OPEN: {
@@ -291,6 +316,11 @@ export class Session {
         }
         break;
       }
+      case Type.ACK: {
+        const a = decodeAck(m.payload);
+        if (a) this.onAck(a);
+        break;
+      }
       case Type.BYE:
         this.reset();
         break;
@@ -328,6 +358,66 @@ export class Session {
     this.currentState = null;
   }
 
+  /** An ACK: what left the network, the receiver's window, and the controller's senses. */
+  private onAck(a: { seq: number; got: number; rwnd: number; owdMin: number | null; echo: number; holdMs: number }): void {
+    let bytes = 0, packets = 0;
+    while (this.flight.length && this.flight[0].seq <= a.seq) {
+      bytes += this.flight[0].bytes;
+      packets++;
+      this.flight.shift();
+    }
+    this.flightBytes -= bytes;
+    this.rwnd = a.rwnd;
+    this.backoff = 1;                      // the receiver is there: normal timeouts, full window
+    this.silent = false;
+    let newlyLost = 0;
+    if (a.seq >= this.acked.seq) {
+      const lost = Math.max(0, a.seq - a.got);
+      // signed: a packet that looked lost because it was overtaken (reordering) and then
+      // arrived counts back, so only real losses add up
+      newlyLost = lost - this.acked.lost;
+      this.acked.seq = a.seq;
+      this.acked.packets = a.got;
+      this.acked.lost = lost;
+    }
+    const rtt = a.echo ? clockMs() - a.echo - a.holdMs : null;
+    this.rc.onAck(bytes, packets, newlyLost, a.owdMin, rtt);
+  }
+
+  /**
+   * Whether a data packet of `bytes` may go now: in flight stays within the smaller of the
+   * congestion window and the receiver's window. Packets unacknowledged for longer than the
+   * retransmission timeout no longer count (they were lost; the erasure code repairs them).
+   * A timeout with no ACK since the last one doubles the timeout and leaves a window of one
+   * packet (RFC 6298, RFC 5681's loss window) until an ACK arrives: a client that went silent
+   * gets one packet, then another after twice as long, and so on, not a stream.
+   */
+  private windowOpen(bytes: number): boolean {
+    if (!this.opts.window) return true;
+    const now = performance.now(), rto = Math.max(MIN_RTO_MS, 3 * this.rc.srtt) * this.backoff;
+    if (this.flight.length && now - this.flight[0].at > rto) {
+      // a timeout: everything outstanding is taken as lost at once (RFC 6298, 5.4-5.6), and
+      // the timeout doubles only per timeout, not per packet of the window that timed out
+      this.acked.expired += this.flight.length;
+      this.flight = [];
+      this.flightBytes = 0;
+      if (this.silent) this.backoff = Math.min(MAX_BACKOFF, this.backoff * 2);
+      this.silent = true;
+    }
+    if (this.rwnd < bytes) { this.acked.zeroWindow++; return false; }
+    const limit = this.silent ? bytes : Math.min(this.rc.cwnd, this.rwnd);
+    if (this.flightBytes + bytes > limit && this.flightBytes > 0) {
+      this.acked.windowStalls++;
+      return false;
+    }
+    return true;
+  }
+
+  /** Whether the window has room for one more packet, for the pacing loop. */
+  get windowBlocked(): boolean {
+    return this.opts.window && !this.windowOpen(MAX_DATAGRAM);
+  }
+
   /**
    * Send up to `budget` bytes, most important first. Returns the bytes sent.
    *
@@ -341,8 +431,16 @@ export class Session {
     let spent = 0;
     while (spent < budget) {
       if (this.currentAt >= this.current.length && !this.nextWork()) break;
-      const payload = this.current[this.currentAt++];
-      const msg = encode(this.currentType, this.epoch, payload);
+      const payload = this.current[this.currentAt];
+      if (!this.windowOpen(payload.length + HEADER)) break;  // the packet waits for the window
+      this.currentAt++;
+      const now = performance.now();
+      if (this.lastDataAt && now - this.lastDataAt > IDLE_RESTART_MS) this.rc.restartAfterIdle();
+      this.lastDataAt = now;
+      const seq = this.seqNext++;
+      const msg = encode(this.currentType, this.epoch, payload, seq);
+      this.flight.push({ seq, bytes: msg.length, at: now });
+      this.flightBytes += msg.length;
       this.send(msg);
       spent += msg.length;
       this.rc.sent(msg.length);
@@ -481,6 +579,9 @@ export class Session {
     return { epoch: this.epoch, views: this.viewsSeen, queued: this.queue.length,
              unitsSent: this.unitsSent, packetsSent: this.packetsSent, bytesSent: this.bytesSent,
              cancelled: this.cancelled, topupPackets: this.topupPackets, topupBytes: this.topupBytes,
-             reported: this.reported, rate, control: this.rc.stats() };
+             reported: this.reported, rate, control: this.rc.stats(),
+             window: { on: this.opts.window, cwndKB: Math.round(this.rc.cwnd / 1024),
+                       rwndKB: Number.isFinite(this.rwnd) ? Math.round(this.rwnd / 1024) : null,
+                       inflightKB: Math.round(this.flightBytes / 1024), ...this.acked } };
   }
 }

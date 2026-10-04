@@ -399,9 +399,22 @@ ws.onmessage = (e) => {
   net.bytes += all.length;
   const body = all.subarray(1);
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  if (all[0] === 1) onConfetti(view, body);
-  else if (all[0] === 2) void onTile(view, body);
+  if (all[0] === 1) {
+    onConfetti(view, body);
+    consumed += all.length;                       // drawn as it landed
+  } else if (all[0] === 2) {
+    void onTile(view, body).finally(() => { consumed += all.length; });   // once decoded
+  } else consumed += all.length;
 };
+
+// Flow control: tell the client half how much of what it forwarded has been fully handled.
+// What it forwarded minus this is our backlog, and the server's receive window shrinks by it.
+let consumed = 0, consumedSent = 0;
+setInterval(() => {
+  if (consumed === consumedSent || ws.readyState !== ws.OPEN) return;
+  consumedSent = consumed;
+  ws.send(JSON.stringify({ type: "consumed", bytes: consumed }));
+}, 50);
 
 let lastSent = "", lastSentAt = 0;
 function sendView(): void {
@@ -645,7 +658,17 @@ function frame(): void {
     `memory     ${((blobBytes + tileBytes) / 2 ** 20).toFixed(1)} of ${MEMORY_BUDGET / 2 ** 20} MB (blobs ${(blobBytes / 2 ** 20).toFixed(1)}, tiles ${(tileBytes / 2 ** 20).toFixed(1)}), ${cache?.evictions ?? 0} evicted\n` +
     `stored     ${(storedBytes / 2 ** 20).toFixed(1)} of ${STORE_BUDGET / 2 ** 20} MB as it arrived, ${stats2.revived} rebuilt from it, ${stats2.storeEvictions} dropped\n` +
     `received   ${net.packets} messages, ${(net.bytes / 2 ** 20).toFixed(2)} MB\n` +
-    `server     epoch ${srv.epoch ?? "-"}, ${srv.queued ?? "-"} queued, ${srv.sessions ?? "-"} session(s)`;
+    `server     epoch ${srv.epoch ?? "-"}, ${srv.queued ?? "-"} queued, ${srv.sessions ?? "-"} session(s)\n` +
+    windowLine(srv);
+}
+
+/** The sliding window as the server sees it: phase, windows, in flight, losses. */
+function windowLine(srv: Record<string, any>): string {
+  const w = srv.window, c = srv.control;
+  if (!w || !c) return "window     -";
+  if (!w.on) return `window     off (rate only), ${c.rateMbit} Mbit/s`;
+  return `window     ${c.phase}, cwnd ${w.cwndKB} KB, rwnd ${w.rwndKB ?? "-"} KB, in flight ${w.inflightKB} KB\n` +
+         `control    ${c.rateMbit} Mbit/s, rtt ${c.srttMs} ms, queue ${c.queueMs} ms, acked #${w.seq}, lost ${w.lost}`;
 }
 
 // ---------------------------------------------------------------------------------------

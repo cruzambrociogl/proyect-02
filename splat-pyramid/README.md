@@ -102,6 +102,46 @@ Following [PLAN.md](PLAN.md):
 Control messages (HELLO, OPEN, the latest VIEW) are resent until answered, so a lost or
 reordered one no longer leaves the viewer waiting.
 
+4b. Sliding window, flow control and slow start (TCP's mechanisms, adapted). Every data packet
+   carries a sequence number (header, 20 bytes, version 2), and the client half answers with
+   ACK (type 15) after every 16 data packets: the highest sequence number received, data
+   packets received, and the receive window. The server keeps what is in flight within
+   min(cwnd, rwnd):
+
+   - **Flow control (rwnd)**: the viewer reports what it has fully handled (drawn, or decoded
+     for a tile), and the window is a 2 MB receive buffer minus what it has not. A page that
+     stops handling data stopped the server at exactly 2.00 MB; it resumed on catching up.
+   - **Congestion window**: during slow start, the slow-start window; after it, 2 x rate x
+     (minimum RTT + ACK delay), from the minimum RTT so the queue stays within a round trip.
+     A timeout (3 RTT, at least 200 ms) takes everything in flight as lost, leaves a window
+     of one packet and doubles at each further timeout (RFC 6298): a client that went silent
+     got 12 KB and a few probes in 10 s, against 707 KB in 3 s without the window.
+   - **Slow start**: 10 packets, doubling per round trip, paced at twice the window. It ends
+     on a queue (HyStart++, with Conservative Slow Start so jitter does not end it), on loss
+     and a flat delivery rate together (a link that drops instead of queueing), or after 3
+     clean round trips at the server's cap. Run-and-tumble takes over at the most that was
+     delivered over two round trips. After 10 s idle it starts again, up to the old rate.
+
+   `--window off --start fixed` gives the old sending (rate only, opening at 4 Mbit/s).
+   `bench/run.ts` on bigbig.png, medians of 5 runs (mobile: 9), time until sharp, MB sent,
+   packets dropped by a full queue:
+
+   | session | link | window + slow start | rate only (before) |
+   |---|---|---|---|
+   | jump | lan | **0.08 s**, 0.55 MB, 0 | 0.29 s, 0.55 MB, 0 |
+   | jump | home | **0.51 s**, 0.56 MB, 0 | 0.56 s, 0.55 MB, 0 |
+   | jump | mobile | 2.31 s, **0.64 MB**, **32** | 2.19 s, 0.80 MB, 134 |
+   | dive | lan | 0.02 s, 6.86 MB, 0 | 0.02 s, 6.02 MB, 0 |
+   | dive | home | **0.25 s**, **4.34 MB**, **0** | 0.29 s, 5.15 MB, 649 |
+   | dive | mobile | **2.46 s**, **1.02 MB**, **80** | 2.56 s, 1.83 MB, 743 |
+
+   Same speed or faster everywhere but the mobile jump (0.1 s slower), with far less waste on
+   the links that lose packets. Tried and dropped on the way: handing over the average
+   delivery rate (too low, the mobile link stayed at 1.3 Mbit/s), BBR's full-pipe exit alone
+   (bunched ACKs fooled it), loss alone (bursts of random loss ended slow start early), a
+   window from the smoothed RTT (it grew with the queue), and a waste term in run-and-tumble's
+   score (sessions end before it acts).
+
 5. Physarum (multiple users): the server's model of several users, `--multi physarum`
    (default). Tero and Nakagaki's slime-mould model: tubes whose conductance grows with the
    flow through them and decays without it (`server/physarum.ts`). Two uses:

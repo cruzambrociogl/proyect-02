@@ -15,6 +15,9 @@
 // --multi    the model of several users: physarum (default, server/physarum.ts), apollonius
 //            (server/apollonius.ts), or none (the packet cache evicts plain LRU, and the
 //            server's upload is shared equally when it is what binds)
+// --window   on (default) or off: the sliding window (congestion and receive windows) on
+//            top of the paced rate; off sends by rate alone, for comparison
+// --start    slow (default) or fixed: open with slow start, or at a fixed 4 Mbit/s
 // --cache    MB of prepared packets the server keeps for all sessions (default 128)
 // --impair   emulate the path toward each client: loss, delay, rate... (shared/emulator.ts)
 
@@ -25,7 +28,7 @@ import { join } from "node:path";
 import { Type, decode, encode, encodeCatalog, typeName } from "../shared/wire.ts";
 import { EmulatedPath, describe, parseImpairment } from "../shared/emulator.ts";
 import { findImages } from "./image.ts";
-import { PacketCache, Session } from "./session.ts";
+import { PacketCache, Session, type SendOptions } from "./session.ts";
 import { Apollonius } from "./apollonius.ts";
 import { Physarum } from "./physarum.ts";
 import { startAdmin } from "./admin.ts";
@@ -41,6 +44,8 @@ const { values: args } = parseArgs({
     impair: { type: "string", default: "none" },
     fixed: { type: "boolean", default: false },
     multi: { type: "string", default: "physarum" },
+    window: { type: "string", default: "on" },
+    start: { type: "string", default: "slow" },
     cache: { type: "string", default: "128" },
   },
 });
@@ -71,19 +76,27 @@ if (apollo) cache.demand = (image, u) => apollo.demand(image, u).interest;
 const physarum = args.multi === "physarum" ? new Physarum() : null;
 cache.physarum = physarum;
 
+if (!["on", "off"].includes(args.window)) throw new Error("--window: on or off");
+if (!["slow", "fixed"].includes(args.start)) throw new Error("--start: slow or fixed");
+const sendOptions: SendOptions = { window: args.window === "on", slowStart: args.start === "slow" };
+
 // Incoming messages per client: a client sends one view per change and a report every 100 ms,
-// so anything far beyond that is not a viewer. Excess is dropped, never processed.
+// so anything far beyond that is not a viewer. Excess is dropped, never processed. ACKs have
+// their own allowance: a client sends one per 16 data packets, at most one per 5 ms.
 const INCOMING_PER_S = 60, INCOMING_BURST = 120;
-const incoming = new Map<string, { tokens: number; at: number }>();
+const ACKS_PER_S = 250, ACKS_BURST = 500;
+const incoming = new Map<string, { tokens: number; at: number; acks: number }>();
 let refused = 0;
-function admit(key: string): boolean {
+function admit(key: string, ack: boolean): boolean {
   const now = performance.now();
-  const b = incoming.get(key) ?? { tokens: INCOMING_BURST, at: now };
-  b.tokens = Math.min(INCOMING_BURST, b.tokens + ((now - b.at) / 1000) * INCOMING_PER_S);
+  const b = incoming.get(key) ?? { tokens: INCOMING_BURST, acks: ACKS_BURST, at: now };
+  const dt = (now - b.at) / 1000;
+  b.tokens = Math.min(INCOMING_BURST, b.tokens + dt * INCOMING_PER_S);
+  b.acks = Math.min(ACKS_BURST, b.acks + dt * ACKS_PER_S);
   b.at = now;
   incoming.set(key, b);
-  if (b.tokens < 1) { refused++; return false; }
-  b.tokens -= 1;
+  if (ack ? b.acks < 1 : b.tokens < 1) { refused++; return false; }
+  if (ack) b.acks -= 1; else b.tokens -= 1;
   return true;
 }
 const sessions = new Map<string, Session>();
@@ -94,7 +107,7 @@ socket.on("message", (datagram, rinfo) => {
   const m = decode(datagram);
   if (!m) return;
   const key = `${rinfo.address}:${rinfo.port}`;
-  if (!admit(key)) return;
+  if (!admit(key, m.type === Type.ACK)) return;
   if (m.type === Type.LIST) {                    // needs no session: the gallery asks before opening
     for (const part of catalog()) socket.send(encode(Type.CATALOG, m.epoch, part), rinfo.port, rinfo.address);
     return;
@@ -104,7 +117,7 @@ socket.on("message", (datagram, rinfo) => {
     if (m.type !== Type.HELLO) return;           // a session starts with HELLO
     // every client gets its own emulated path
     const path = new EmulatedPath(downstream, (msg) => socket.send(msg, rinfo.port, rinfo.address));
-    s = new Session({ address: rinfo.address, port: rinfo.port }, images, cache, (msg) => path.send(msg), rateBytes);
+    s = new Session({ address: rinfo.address, port: rinfo.port }, images, cache, (msg) => path.send(msg), rateBytes, sendOptions);
     if (args.fixed) s.rc.rate = rateBytes;
     paths.set(key, path);
     if (apollo) s.attach(apollo, key);
@@ -203,6 +216,6 @@ setInterval(() => {
 }, 500);
 
 socket.bind(Number(args.port), () => {
-  console.log(`server on udp ${args.port}, ${args.rate} Mbit/s, images: ${[...images.keys()].join(", ")}`);
+  console.log(`server on udp ${args.port}, ${args.rate} Mbit/s, window ${args.window}, start ${args.start}, images: ${[...images.keys()].join(", ")}`);
   console.log(`path to clients: ${describe(downstream)}`);
 });

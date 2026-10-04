@@ -32,6 +32,32 @@
 // two machines' clocks never need to agree. A queue past Q_MAX forces a cut, at most once
 // per round trip.
 //
+// Slow start (the default; --start fixed gives the old opening). A session opens with a
+// congestion window of IW bytes, and every byte acknowledged (ACK) adds a byte to it, so the
+// window doubles each round trip (RFC 5681). It is paced at twice the window per round trip.
+// It ends, HyStart++ style (RFC 9406), on a queue rather than on a loss (random loss is the
+// erasure code's business). The first sign of a queue starts Conservative Slow Start: the
+// window grows at a quarter of the pace, and if the delay falls back it was jitter and slow
+// start resumes; if it lasts CSS_ROUNDS round trips, slow start is over. A link with a short
+// queue drops instead of delaying, so slow start also ends on loss, but only on both signs of
+// a full link together: over SS_EXIT_LOSS of the packets of two round trips lost, and the
+// delivery rate no longer growing (by PLATEAU_GROWTH in the last busy round trip). Either
+// alone misleads: bursts of random loss come while delivery still grows, and bunched ACKs
+// or a pause make delivery look flat with nothing lost. Reaching the server's cap says only
+// how fast the server will go, not what the link takes: slow start paces at the cap for
+// CAP_ROUNDS more round trips (the window no longer growing) and ends there only if none of
+// them showed a full link. Then the rate is the
+// most that was delivered over two round trips (once a queue forms, that is the bottleneck's
+// rate), and run-and-tumble takes over from there. After IDLE_RESTART_MS without
+// sending, the session starts slowly again, but only up to the rate it had (its ssthresh):
+// shorter pauses, a viewer looking at the image, keep the window (RFC 7661).
+//
+// The window. In flight is at most cwnd bytes (server/session.ts): during slow start the
+// window above; after it, twice what the rate delivers in a round trip of the path without a
+// queue (the minimum RTT) plus the ACK delay. Pacing sets the speed and the window is the
+// cap, as BBR combines them: the queue stays within about one round trip, and if
+// acknowledgements stop, so does the sending (session.ts: timeouts with backoff).
+//
 // The randomness is the point with several clients. Controllers that all react the same way
 // to the same congestion back off together and oscillate together; tumbles do not line up.
 
@@ -56,6 +82,20 @@ const BASE_WINDOW_MS = 10_000;
 const REPORT_MS = 100;
 const MIN_JUDGE_PACKETS = 80;
 
+export const PACKET = 1200;
+export const IW = 10 * PACKET;             // initial window (RFC 6928)
+const WINDOW_GAIN = 2;                     // cwnd after slow start: this many rate x round trips
+const ACK_DELAY_MS = 20;                   // the longest a client holds an ACK (client/link.ts)
+const SS_EXIT_MS = 25;                     // queueing delay that ends slow start...
+const SS_EXIT_PACKETS = 20;                // ...seen over at least this many acknowledged packets
+export const IDLE_RESTART_MS = 10_000;
+const CSS_GROWTH_DIVISOR = 4;              // RFC 9406
+const CSS_ROUNDS = 5;                      // RFC 9406
+const SS_EXIT_LOSS = 0.1;                  // random loss is a few %; a full link drops more
+const SS_LOSS_PACKETS = 64;                // judged over at least this many packets
+const PLATEAU_GROWTH = 1.25;               // delivery growing less than this per round: flat
+const CAP_ROUNDS = 3;                      // clean round trips at the cap before trusting it
+
 export const RATE_MIN = 32_000;            // bytes/s: 256 kbit/s
 export const RATE_START = 500_000;         // bytes/s: 4 Mbit/s. From 1 Mbit/s the first half
                                            // second on a fast link showed a blurry opening
@@ -64,6 +104,17 @@ export const RATE_START = 500_000;         // bytes/s: 4 Mbit/s. From 1 Mbit/s t
 
 export class RunAndTumble {
   rate = RATE_START;
+  /** "slow start" until the first queue, then "run-and-tumble". */
+  phase: "slow start" | "run-and-tumble" = "run-and-tumble";
+  private ssWindow = IW;                  // the congestion window while in slow start
+  private ssthresh = Infinity;            // bytes/s: where a restarted slow start stops
+  private ssAcked = 0;                    // packets acknowledged in this slow start
+  private delivered: { at: number; bytes: number; packets: number; lost: number }[] = [];
+  private rttSamples: { at: number; rtt: number }[] = [];
+  private ssMaxDelivery = 0;              // the most delivered in a round trip, this slow start
+  private cssSince = 0;                   // when Conservative Slow Start began; 0: not in it
+  private round = { start: 0, bw: 0, flat: false, busy: 0, ticks: 0 };     // delivery per round
+  private capSince = 0;                   // when slow start reached the cap; 0: not at it
   private max: number;
   private dir = 1;
   private step = S_MAX;           // the first run is long; the first tumble brings it to S_MIN
@@ -85,8 +136,137 @@ export class RunAndTumble {
   score = 0;
   loss = 0;
 
-  constructor(max: number) {
+  private readonly slowStart: boolean;
+
+  constructor(max: number, slowStart = true) {
     this.max = max;
+    this.slowStart = slowStart;
+    if (slowStart) this.enterSlowStart(Infinity);
+  }
+
+  private enterSlowStart(ssthresh: number): void {
+    this.phase = "slow start";
+    this.ssWindow = IW;
+    this.ssthresh = ssthresh;
+    this.ssAcked = 0;
+    this.ssMaxDelivery = 0;
+    this.cssSince = 0;
+    this.round = { start: performance.now(), bw: 0, flat: false, busy: 0, ticks: 0 };
+    this.capSince = 0;
+    this.firstRun = false;
+    this.paceSlowStart();
+  }
+
+  /** Slow start is paced at twice its window per round trip. */
+  private paceSlowStart(): void {
+    this.rate = Math.min(this.max, Math.max(RATE_MIN, (2 * this.ssWindow) / (Math.max(1, this.srtt) / 1000)));
+  }
+
+  /**
+   * The congestion window, bytes: how much may be in flight. After slow start, twice what the
+   * rate delivers in a round trip of the path without a queue (the minimum RTT, as BBR does).
+   * The smoothed RTT includes the queue: a window from it grows as the queue grows, which
+   * lets the queue grow further; from the minimum, the queue is held to about one round trip.
+   */
+  get cwnd(): number {
+    if (this.phase === "slow start") return this.ssWindow;
+    return Math.max(IW, (WINDOW_GAIN * this.rate * (this.minRtt + ACK_DELAY_MS)) / 1000);
+  }
+
+  /** The smallest round trip seen over the last BASE_WINDOW_MS: the path without a queue. */
+  get minRtt(): number {
+    return this.rttSamples.length ? Math.min(...this.rttSamples.map((s) => s.rtt)) : this.srtt;
+  }
+
+  /** Bytes delivered per second over the last round trip, from the ACKs. */
+  get deliveryRate(): number {
+    const d = this.delivered;
+    if (d.length < 2) return 0;
+    const span = d[d.length - 1].at - d[0].at;
+    return span > 0 ? (d.slice(1).reduce((a, x) => a + x.bytes, 0) / span) * 1000 : 0;
+  }
+
+  /** Nothing was sent for IDLE_RESTART_MS: start slowly again, up to the rate it had. */
+  restartAfterIdle(): void {
+    if (this.slowStart && this.phase === "run-and-tumble") this.enterSlowStart(this.rate);
+  }
+
+  /**
+   * An ACK: what it acknowledged (bytes, packets), packets newly known lost, its delay sample
+   * and a round-trip sample (ms, or null).
+   */
+  onAck(ackedBytes: number, ackedPackets: number, lostPackets: number, owdMin: number | null, rtt: number | null): void {
+    const now = performance.now();
+    if (rtt !== null && rtt >= 0 && rtt < 10_000) {
+      this.srtt = 0.875 * this.srtt + 0.125 * rtt;
+      // the minimum over a window: one sample per 50 ms is plenty
+      const last = this.rttSamples[this.rttSamples.length - 1];
+      if (!last || now - last.at > 50 || rtt < last.rtt) this.rttSamples.push({ at: now, rtt });
+      while (this.rttSamples.length && now - this.rttSamples[0].at > BASE_WINDOW_MS) this.rttSamples.shift();
+    }
+    if (owdMin !== null) {
+      this.owdSamples.push({ at: now, owd: owdMin });
+      while (this.owdSamples.length && now - this.owdSamples[0].at > BASE_WINDOW_MS) this.owdSamples.shift();
+    }
+    if (ackedBytes > 0 || lostPackets !== 0) {
+      this.delivered.push({ at: now, bytes: ackedBytes, packets: ackedPackets, lost: lostPackets });
+      const keep = Math.max(100, 2 * this.srtt);
+      while (this.delivered.length > 2 && now - this.delivered[0].at > keep) this.delivered.shift();
+      // the bottleneck's rate: once a queue forms the link delivers at full speed, so the
+      // largest round trip's delivery seen is the estimate (BBR's max filter), not an average
+      // that includes the start of the ramp
+      if (this.phase === "slow start" && now - this.delivered[0].at >= keep * 0.8) {
+        this.ssMaxDelivery = Math.max(this.ssMaxDelivery, this.deliveryRate);
+      }
+    }
+    if (this.phase !== "slow start") return;
+    this.ssAcked += ackedPackets;
+    const base = this.owdSamples.length ? Math.min(...this.owdSamples.map((s) => s.owd)) : 0;
+    const q = owdMin === null ? this.q : Math.max(0, owdMin - base);
+    this.q = q;
+    if (this.capSince) {
+      // at the cap: the window stays, the link is on probation
+    } else if (!this.cssSince) {
+      this.ssWindow += ackedBytes;
+      if (q > SS_EXIT_MS && this.ssAcked >= SS_EXIT_PACKETS) this.cssSince = now;   // a queue?
+    } else {
+      this.ssWindow += ackedBytes / CSS_GROWTH_DIVISOR;
+      if (q < SS_EXIT_MS / 2) this.cssSince = 0;                // it was jitter: carry on
+      else if (now - this.cssSince > CSS_ROUNDS * this.srtt) return this.leaveSlowStart(now, -1);
+    }
+    // a full link that drops: loss and a flat delivery rate together
+    const r = this.round;
+    if (now - r.start >= this.srtt) {
+      if (r.ticks > 0 && r.busy / r.ticks >= 0.7) {       // a round with little to send says nothing
+        r.flat = this.ssMaxDelivery < r.bw * PLATEAU_GROWTH;
+        r.bw = Math.max(r.bw, this.ssMaxDelivery);
+      }
+      r.start = now;
+      r.busy = r.ticks = 0;
+    }
+    const counted = this.delivered.reduce((a, d) => a + d.packets + Math.max(0, d.lost), 0);
+    const lost = Math.max(0, this.delivered.reduce((a, d) => a + d.lost, 0));
+    if (r.flat && counted >= SS_LOSS_PACKETS && lost / counted > SS_EXIT_LOSS) return this.leaveSlowStart(now, -1);
+    this.paceSlowStart();
+    if (this.rate >= this.ssthresh) {                     // a restart: back where it was
+      this.rate = Math.min(this.max, this.ssthresh);
+      return this.leaveSlowStart(now, 1);
+    }
+    if (this.rate >= this.max) {
+      this.rate = this.max;
+      if (!this.capSince) this.capSince = now;
+      else if (now - this.capSince > CAP_ROUNDS * this.srtt) this.leaveSlowStart(now, 1);   // it holds
+    }
+  }
+
+  /** Slow start found the ceiling (or its ssthresh): carry on at the delivered rate. */
+  private leaveSlowStart(now: number, dir: number): void {
+    this.phase = "run-and-tumble";
+    if (dir < 0) this.rate = Math.min(this.max, Math.max(RATE_MIN, this.ssMaxDelivery || this.deliveryRate || this.rate / 2));
+    this.dir = dir;
+    this.step = S_MIN;
+    this.lastScore = null;
+    this.change(1, now);
   }
 
   /** The session sent a packet of this many bytes. */
@@ -99,6 +279,8 @@ export class RunAndTumble {
   tick(busy: boolean): void {
     this.window.ticks++;
     if (busy) this.window.busy++;
+    this.round.ticks++;
+    if (busy) this.round.busy++;
   }
 
   onReport(r: Report): void {
@@ -119,6 +301,10 @@ export class RunAndTumble {
 
     const base = Math.min(...this.owdSamples.map((s) => s.owd));
     const q = this.window.owdMin === null ? this.lastQ : Math.max(0, this.window.owdMin - base);
+    if (this.phase === "slow start") {                    // the ACKs drive it; nothing to judge
+      this.resetWindow();
+      return;
+    }
     this.q = q;
     if (this.firstRun && q > FIRST_RUN_EXIT_MS && this.window.delivered >= FIRST_RUN_EXIT_PACKETS) {
       // the first run found the ceiling
@@ -184,7 +370,8 @@ export class RunAndTumble {
   }
 
   stats(): Record<string, unknown> {
-    return { rateMbit: +((this.rate * 8) / 1e6).toFixed(2), srttMs: Math.round(this.srtt),
+    return { phase: this.phase === "slow start" && this.cssSince ? "conservative slow start" : this.phase, cwndKB: Math.round(this.cwnd / 1024), minRttMs: Math.round(this.minRtt),
+             rateMbit: +((this.rate * 8) / 1e6).toFixed(2), srttMs: Math.round(this.srtt),
              queueMs: Math.round(this.q), loss: +this.loss.toFixed(3), runs: this.runs,
              tumbles: this.tumbles, cuts: this.cuts, dir: this.dir, step: +this.step.toFixed(3) };
   }

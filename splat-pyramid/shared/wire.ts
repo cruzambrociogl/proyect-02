@@ -9,12 +9,15 @@
 //  12  u32       sent at: the sender's clock in ms (wraps). The receiver compares it with its
 //                own clock: the absolute value means nothing (the clocks differ), but how it
 //                changes is how long packets are waiting in queues along the way
-//  16  payload
+//  16  u32       sequence number: every data packet (CONFETTI, TILEPART, REPAIR) of a session
+//                gets the next one, from 1; 0 on everything else. ACK names the highest one
+//                received, which is how the server knows what is still in flight
+//  20  payload
 //
 // All integers are big-endian. Datagrams stay under MAX_DATAGRAM so they never fragment.
 
-export const VERSION = 1;
-export const HEADER = 16;
+export const VERSION = 2;
+export const HEADER = 20;
 
 /** This process's clock for "sent at", in ms. */
 const clockZero = performance.now();
@@ -36,13 +39,14 @@ export const Type = {
   REPAIR: 12,    // server -> client: a mixture of one block's packets (fec.ts)
   LIST: 13,      // client -> server: which images are there? (needs no session)
   CATALOG: 14,   // server -> client: one part of the answer, JSON
+  ACK: 15,       // client -> server: highest sequence number received, receive window
 } as const;
 export type TypeCode = (typeof Type)[keyof typeof Type];
 
 export const typeName = (t: number): string =>
   Object.entries(Type).find(([, v]) => v === t)?.[0] ?? `type ${t}`;
 
-export function encode(type: TypeCode, epoch: number, payload: Uint8Array = new Uint8Array(0)): Buffer {
+export function encode(type: TypeCode, epoch: number, payload: Uint8Array = new Uint8Array(0), seq = 0): Buffer {
   const out = Buffer.allocUnsafe(HEADER + payload.length);
   out[0] = 0x53; // 'S'
   out[1] = 0x50; // 'P'
@@ -51,6 +55,7 @@ export function encode(type: TypeCode, epoch: number, payload: Uint8Array = new 
   out.writeUInt32BE(epoch >>> 0, 4);
   out.writeUInt32BE(payload.length, 8);
   out.writeUInt32BE(clockMs(), 12);
+  out.writeUInt32BE(seq >>> 0, 16);
   out.set(payload, HEADER);
   return out;
 }
@@ -59,6 +64,7 @@ export interface Message {
   type: number;
   epoch: number;
   sentAt: number;
+  seq: number;
   payload: Buffer;
 }
 
@@ -69,7 +75,7 @@ export function decode(datagram: Buffer): Message | null {
   const length = datagram.readUInt32BE(8);
   if (HEADER + length > datagram.length) return null;
   return { type: datagram[3], epoch: datagram.readUInt32BE(4), sentAt: datagram.readUInt32BE(12),
-           payload: datagram.subarray(HEADER, HEADER + length) };
+           seq: datagram.readUInt32BE(16), payload: datagram.subarray(HEADER, HEADER + length) };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -207,6 +213,48 @@ export function decodeReport(b: Buffer): Report {
   return { packets: b.readUInt32BE(0), bytes: b.readUInt32BE(4), intervalBytes: b.readUInt32BE(8),
            intervalMs: b.readUInt16BE(12), owdMin: owd === NO_DELAY ? null : owd,
            echo: b.readUInt32BE(18), holdMs: b.readUInt16BE(22), blocks };
+}
+
+/**
+ * ACK: the sliding window's feedback, sent after every few data packets (more often than
+ * REPORT, which carries the erasure code's counts and paces the rate controller).
+ *
+ *   0  u32  highest sequence number received: every data packet up to it has arrived or is
+ *           lost; the ones after it may still be on their way (the server's "in flight")
+ *   4  u32  data packets received so far (so packets lost = sent up to that number - this)
+ *   8  u32  receive window, bytes: how much more the receiver can take now (flow control)
+ *  12  i32  smallest one-way delay since the last ACK, ms; INT32_MIN if none
+ *  16  u32  "sent at" of the packet with the highest sequence number
+ *  20  u16  ms between that packet arriving and this ACK (so the server can take it out of
+ *           the round-trip time)
+ */
+export interface Ack {
+  seq: number;
+  got: number;
+  rwnd: number;
+  owdMin: number | null;
+  echo: number;
+  holdMs: number;
+}
+
+export const ACK_BYTES = 22;
+
+export function encodeAck(a: Ack): Buffer {
+  const b = Buffer.alloc(ACK_BYTES);
+  b.writeUInt32BE(a.seq >>> 0, 0);
+  b.writeUInt32BE(a.got >>> 0, 4);
+  b.writeUInt32BE(Math.max(0, Math.min(0xffffffff, Math.round(a.rwnd))), 8);
+  b.writeInt32BE(a.owdMin === null ? NO_DELAY : Math.max(NO_DELAY + 1, Math.min(0x7fffffff, Math.round(a.owdMin))), 12);
+  b.writeUInt32BE(a.echo >>> 0, 16);
+  b.writeUInt16BE(Math.min(65535, Math.max(0, Math.round(a.holdMs))), 20);
+  return b;
+}
+
+export function decodeAck(b: Buffer): Ack | null {
+  if (b.length < ACK_BYTES) return null;
+  const owd = b.readInt32BE(12);
+  return { seq: b.readUInt32BE(0), got: b.readUInt32BE(4), rwnd: b.readUInt32BE(8),
+           owdMin: owd === NO_DELAY ? null : owd, echo: b.readUInt32BE(16), holdMs: b.readUInt16BE(20) };
 }
 
 /**

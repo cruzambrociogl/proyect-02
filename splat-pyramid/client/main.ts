@@ -10,6 +10,8 @@
 // Browser -> client half (JSON text):
 //   {type: "open", image}                         open an image
 //   {type: "view", cx, cy, scale, w, h, dropped}  where the viewer is looking
+//   {type: "consumed", bytes}                     binary bytes fully handled so far (drawn,
+//                                                 or decoded for a tile): flow control
 // Client half -> browser:
 //   text   {type: "chart" | "stats" | "fault" | "link", ...}
 //   binary [1] + CONFETTI payload                 some blobs of a splat unit, as they land
@@ -21,7 +23,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
 import { describe, parseImpairment } from "../shared/emulator.ts";
-import { ClientLink } from "./link.ts";
+import { ClientLink, RECV_BUFFER } from "./link.ts";
 
 const { values: args } = parseArgs({
   options: {
@@ -35,8 +37,16 @@ const upstream = parseImpairment(args.impair);
 const link = new ClientLink(args.server, upstream);
 let browser: WebSocket | null = null;
 
+// Flow control: the receive window the server is told is the receive buffer minus what the
+// page has not handled yet. That counts both what waits in the WebSocket and what the page
+// holds but has not decoded, so a busy browser slows the server down.
+let forwarded = 0, consumed = 0;
+link.receiveWindow = () => (browser ? Math.max(0, RECV_BUFFER - (forwarded - consumed)) : 0);
+
 function toBrowser(data: string | Buffer): void {
-  if (browser && browser.readyState === browser.OPEN) browser.send(data);
+  if (!browser || browser.readyState !== browser.OPEN) return;
+  if (typeof data !== "string") forwarded += data.length;
+  browser.send(data);
 }
 
 link.events = {
@@ -97,11 +107,13 @@ const wss = new WebSocketServer({ server: http, path: "/ws" });
 wss.on("connection", (ws) => {
   if (browser) browser.close(1000, "another viewer took over this client half");
   browser = ws;
+  forwarded = consumed = 0;
   link.hello();          // a fresh page holds nothing: the server must forget what it sent
   ws.on("message", (data, isBinary) => {
     if (isBinary) return;
     const msg = JSON.parse(data.toString());
     if (msg.type === "open") link.open(String(msg.image));
+    else if (msg.type === "consumed" && browser === ws) consumed = Math.min(forwarded, Number(msg.bytes) || 0);
     else if (msg.type === "view") {
       link.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped);
     }

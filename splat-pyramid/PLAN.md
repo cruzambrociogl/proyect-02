@@ -265,8 +265,8 @@ acknowledgement. Repair symbols are generated once per tile and serve every user
 
 ## 5. Messages
 
-A 16-byte header: magic, version, type, epoch, length, and `sentAt` (for one-way delay).
-Then the payload.
+A 20-byte header: magic, version, type, epoch, length, `sentAt` (for one-way delay), and a
+sequence number on data packets (for the sliding window). Then the payload.
 
 | type | direction | payload |
 |---|---|---|
@@ -280,6 +280,7 @@ Then the payload.
 | `REPAIR` | server to client | unit id, erasure block, symbol index, repair symbol |
 | `STATS` | server to client | what the session is doing, for the viewer's panel |
 | `FAULT` | server to client | an error explained |
+| `ACK` | client to server | highest sequence number received, data packets received, receive window, delay and RTT samples |
 | `BYE` | client to server | the session ends |
 | `LIST` / `CATALOG` | client to server / back | the images ready to view, for the gallery |
 

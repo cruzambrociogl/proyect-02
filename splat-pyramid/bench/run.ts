@@ -5,6 +5,7 @@
 //
 //   node bench/run.ts [--images data] [--image bills] [--session jump|dive]
 //                     [--configs "lan@50,home@50,mobile@50,home@18!"] [--repeat 5]
+//                     [--server="--window off --start fixed"]   (extra server options)
 //
 // With --repeat, each config runs that many times and the table shows medians (loss and
 // the rate controller's tumbles are random, so single runs are noisy).
@@ -39,6 +40,7 @@ const { values: args } = parseArgs({
     configs: { type: "string", default: "lan@50,home@50,mobile@50,home@18!,mobile@1.8!" },
     port: { type: "string", default: "9100" },
     hold: { type: "string", default: "8000" },
+    server: { type: "string", default: "" },
   },
 });
 
@@ -67,8 +69,8 @@ function script(kind: string): { views: Omit<View, "dropped">[]; stepMs: number 
 
 function startServer(profile: string, rate: string, fixed: boolean): Promise<ChildProcess> {
   const child = spawn(process.execPath, [join(import.meta.dirname, "..", "server", "main.ts"),
-    "--images", args.images, "--port", args.port, "--rate", rate, "--impair", profile,
-    ...(fixed ? ["--fixed"] : [])],
+    "--images", args.images, "--port", args.port, "--http", "8110", "--rate", rate, "--impair", profile,
+    ...(fixed ? ["--fixed"] : []), ...args.server.split(" ").filter(Boolean)],
     { stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve) => {
     child.stdout!.on("data", (d: Buffer) => { if (d.toString().includes("server on udp")) resolve(child); });
@@ -86,7 +88,7 @@ async function run(profile: string, rateSpec: string) {
   const t0s = performance.now();
   link.events = { chart: () => { chart = true; }, stats: (s) => {
     stats = s;
-    if (process.env.TRACE) console.log(`  ${((performance.now() - t0s) / 1000).toFixed(1)} s`, JSON.stringify(s.control));
+    if (process.env.TRACE) console.log(`  ${((performance.now() - t0s) / 1000).toFixed(1)} s`, JSON.stringify(s.control), JSON.stringify(s.window));
   } };
   const t0 = performance.now();
   link.hello();

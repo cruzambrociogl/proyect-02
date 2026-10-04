@@ -6,11 +6,16 @@
 // block, how many independent symbols it holds, never which packets were lost. When repair
 // symbols complete a block, the packets rebuilt from them are handed on exactly as if they
 // had arrived. Splat packets are handed on as they land; tiles once whole.
+//
+// It also acknowledges data packets for the server's sliding window: an ACK after every
+// ACK_EVERY of them (at most one per ACK_GAP_MS, and at the latest ACK_DELAY_MS after the
+// last), naming the highest sequence number received and the receive window: how much more
+// the receiver can take, from `receiveWindow` (client/main.ts measures it from the viewer).
 
 import { createSocket, type Socket } from "node:dgram";
 import {
-  Type, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeReport, encodeView, unitKey,
-  MAX_COUNTS, decodeCatalogPart, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
+  Type, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeAck, encodeReport, encodeView, unitKey,
+  MAX_COUNTS, MAX_DATAGRAM, decodeCatalogPart, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
 } from "../shared/wire.ts";
 import { TILE_HEAD, TILE_PART, WIDTH_SPLAT, WIDTH_TILE, blockOfPacket, readTilePart } from "../shared/units.ts";
 import { BlockDecoder, frame, unframe } from "../shared/fec.ts";
@@ -20,6 +25,11 @@ export const REPORT_MS = 100;
 /** Control messages (HELLO, OPEN, the latest VIEW) are sent again until answered, this often. */
 const RETRY_MS = 300;
 const TILE_ASSEMBLY_TIMEOUT_MS = 30_000;
+const ACK_EVERY = 16;              // data packets per ACK
+const ACK_GAP_MS = 5;              // at most one ACK this often
+const ACK_DELAY_MS = 20;           // the longest a received packet waits to be acknowledged
+/** The receive buffer when nothing else says how much the receiver can take. */
+export const RECV_BUFFER = 2 * 2 ** 20;
 
 export interface LinkEvents {
   welcome?: () => void;
@@ -58,6 +68,11 @@ export class ClientLink {
   // since the last report: for the server's rate controller
   private interval = { bytes: 0, owdMin: null as number | null, since: performance.now() };
   private echo = { sentAt: 0, receivedAt: 0 };
+  /** How many more bytes the receiver can take now: the window advertised in every ACK. */
+  receiveWindow: () => number = () => RECV_BUFFER;
+  // what the next ACK says
+  private ackState = { seq: 0, sentAt: 0, at: 0, got: 0, pending: 0, owdMin: null as number | null,
+                       lastAt: 0, lastRwnd: -1, timer: null as NodeJS.Timeout | null };
 
   constructor(server: string, upstream: Impairment = NONE) {
     const [host, port] = server.split(":");
@@ -78,6 +93,7 @@ export class ClientLink {
   close(): void {
     this.closed = true;
     clearInterval(this.timer);
+    if (this.ackState.timer) clearTimeout(this.ackState.timer);
     this.socket.close();
   }
 
@@ -104,6 +120,8 @@ export class ClientLink {
     this.pendingOpen = null;
     this.lastView = null;
     this.serverEpoch = 0;
+    if (this.ackState.timer) clearTimeout(this.ackState.timer);
+    this.ackState = { seq: 0, sentAt: 0, at: 0, got: 0, pending: 0, owdMin: null, lastAt: 0, lastRwnd: -1, timer: null };
     this.helloAt = performance.now();
     this.send(Type.HELLO);
   }
@@ -182,6 +200,29 @@ export class ClientLink {
   }
 
   private catalogWaiters = new Set<(payload: Buffer) => void>();
+
+  /** A data packet arrived: note it, and acknowledge every ACK_EVERY of them. */
+  private noteData(seq: number, sentAt: number, owd: number): void {
+    const a = this.ackState, now = performance.now();
+    a.got++;
+    a.pending++;
+    if (seq > a.seq) { a.seq = seq; a.sentAt = sentAt; a.at = now; }
+    if (a.owdMin === null || owd < a.owdMin) a.owdMin = owd;
+    if (a.pending >= ACK_EVERY && now - a.lastAt >= ACK_GAP_MS) this.ack();
+    else if (!a.timer) a.timer = setTimeout(() => { a.timer = null; if (a.pending) this.ack(); }, ACK_DELAY_MS);
+  }
+
+  private ack(): void {
+    const a = this.ackState, now = performance.now();
+    if (a.timer) { clearTimeout(a.timer); a.timer = null; }
+    const rwnd = Math.max(0, this.receiveWindow());
+    this.send(Type.ACK, encodeAck({ seq: a.seq, got: a.got, rwnd, owdMin: a.owdMin, echo: a.sentAt,
+                                    holdMs: now - a.at }));
+    a.pending = 0;
+    a.owdMin = null;
+    a.lastAt = now;
+    a.lastRwnd = rwnd;
+  }
 
   bye(): void {
     this.send(Type.BYE);
@@ -319,12 +360,15 @@ export class ClientLink {
         this.events.fault?.(m.payload.toString("utf8"));
         break;
       case Type.CONFETTI:
+        this.noteData(m.seq, m.sentAt, owd);
         this.onPacket(false, m.payload, false);
         break;
       case Type.TILEPART:
+        this.noteData(m.seq, m.sentAt, owd);
         this.onPacket(true, m.payload, false);
         break;
       case Type.REPAIR:
+        this.noteData(m.seq, m.sentAt, owd);
         this.onRepair(m.payload);
         break;
       case Type.CATALOG:
@@ -360,5 +404,9 @@ export class ClientLink {
     // a block completed, or it would repair it for nothing
     for (const [, b] of changed.slice(0, MAX_COUNTS)) b.changed = false;
     this.interval = { bytes: 0, owdMin: null, since: now };
+    // a window update: the receiver caught up (or fell behind) since the last ACK said, and
+    // a server stopped by a closed window hears it without waiting for data
+    const rwnd = this.receiveWindow(), last = this.ackState.lastRwnd;
+    if (last >= 0 && Math.abs(rwnd - last) >= Math.max(ACK_EVERY * MAX_DATAGRAM, last / 4)) this.ack();
   }
 }
