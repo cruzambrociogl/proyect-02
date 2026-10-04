@@ -5,7 +5,7 @@
 //
 //   node bench/run.ts [--images data] [--image bills] [--session jump|dive]
 //                     [--configs "lan@50,home@50,mobile@50,home@18!"] [--repeat 5]
-//                     [--server="--window off --start fixed"]   (extra server options)
+//                     [--server="--window off"]   (extra server options)
 //
 // With --repeat, each config runs that many times and the table shows medians (loss and
 // the rate controller's tumbles are random, so single runs are noisy).

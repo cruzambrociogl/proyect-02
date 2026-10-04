@@ -122,11 +122,12 @@ reordered one no longer leaves the viewer waiting.
      clean round trips at the server's cap. Run-and-tumble takes over at the most that was
      delivered over two round trips. After 10 s idle it starts again, up to the old rate.
 
-   `--window off --start fixed` gives the old sending (rate only, opening at 4 Mbit/s).
+   `--window off` sends by rate alone, for comparison. The old opening (a fixed 4 Mbit/s, then
+   run-and-tumble's "first run" with long steps) was removed once slow start measured as well.
    `bench/run.ts` on bigbig.png, medians of 5 runs (mobile: 9), time until sharp, MB sent,
    packets dropped by a full queue:
 
-   | session | link | window + slow start | rate only (before) |
+   | session | link | window + slow start | rate only, fixed 4 Mbit/s start (before) |
    |---|---|---|---|
    | jump | lan | **0.08 s**, 0.55 MB, 0 | 0.29 s, 0.55 MB, 0 |
    | jump | home | **0.51 s**, 0.56 MB, 0 | 0.56 s, 0.55 MB, 0 |

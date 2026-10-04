@@ -21,18 +21,15 @@
 //   tumble  it got worse: pick a direction at random, biased by the delay trend (delay rising
 //           makes "down" likely), and go back to the smallest step
 //
-// The first run starts with the longest step, so a new session climbs to a fast link's rate
-// in a few round trips. It ends at the first tumble, or as soon as any report shows a queue
-// forming (checked on every report, not once per round trip, since each step of the first
-// run is large): the rate steps back and the controller carries on with small steps.
+// A session does not start here: it starts with slow start (below), which hands over a rate.
 //
 // Every change is judged only once its effect can be seen: one round trip plus two reports
-// later (one report during a long run), and over at least MIN_JUDGE_PACKETS delivered packets (one report alone, or a few
+// later, and over at least MIN_JUDGE_PACKETS delivered packets (one report alone, or a few
 // dozen packets on a slow link, is too noisy: one burst of loss outweighs a 5% step). Queueing delay is the one-way delay minus the smallest seen in the last 10 s, so the
 // two machines' clocks never need to agree. A queue past Q_MAX forces a cut, at most once
 // per round trip.
 //
-// Slow start (the default; --start fixed gives the old opening). A session opens with a
+// Slow start. A session opens with a
 // congestion window of IW bytes, and every byte acknowledged (ACK) adds a byte to it, so the
 // window doubles each round trip (RFC 5681). It is paced at twice the window per round trip.
 // It ends, HyStart++ style (RFC 9406), on a queue rather than on a loss (random loss is the
@@ -69,10 +66,6 @@ const TAU_MS = 80;          // queueing delay at which the score is divided by e
                             // mobile link): at 25 ms a 3 ms wobble moved the score 12%, more
                             // than a 5% step, and the controller chased jitter downward
 const Q_MAX_MS = 150;       // queueing delay that forces an immediate cut
-const FIRST_RUN_EXIT_MS = 25;   // queueing delay that ends the first run...
-const FIRST_RUN_EXIT_PACKETS = 20;  // ...measured over at least this many packets: the smallest
-                                    // delay of a few packets on a jittery link can sit 25 ms
-                                    // above the true minimum with no queue at all
 const S_MIN = 0.05;         // smallest step: 5% of the rate
 const S_MAX = 0.5;          // longest step while running
 const EPS = 0.02;           // a score must beat the last one by 2% to count as better
@@ -97,15 +90,11 @@ const PLATEAU_GROWTH = 1.25;               // delivery growing less than this pe
 const CAP_ROUNDS = 3;                      // clean round trips at the cap before trusting it
 
 export const RATE_MIN = 32_000;            // bytes/s: 256 kbit/s
-export const RATE_START = 500_000;         // bytes/s: 4 Mbit/s. From 1 Mbit/s the first half
-                                           // second on a fast link showed a blurry opening
-                                           // view (21.8 dB against v1's 28.4); on a slower
-                                           // link the first run's exit catches the excess
 
 export class RunAndTumble {
-  rate = RATE_START;
+  rate = RATE_MIN;                        // set by slow start from the first moment
   /** "slow start" until the first queue, then "run-and-tumble". */
-  phase: "slow start" | "run-and-tumble" = "run-and-tumble";
+  phase: "slow start" | "run-and-tumble" = "slow start";
   private ssWindow = IW;                  // the congestion window while in slow start
   private ssthresh = Infinity;            // bytes/s: where a restarted slow start stops
   private ssAcked = 0;                    // packets acknowledged in this slow start
@@ -117,8 +106,7 @@ export class RunAndTumble {
   private capSince = 0;                   // when slow start reached the cap; 0: not at it
   private max: number;
   private dir = 1;
-  private step = S_MAX;           // the first run is long; the first tumble brings it to S_MIN
-  private firstRun = true;
+  private step = S_MIN;
   private lastScore: number | null = null;
   private lastQ = 0;
   private judgeAfter = 0;
@@ -136,12 +124,9 @@ export class RunAndTumble {
   score = 0;
   loss = 0;
 
-  private readonly slowStart: boolean;
-
-  constructor(max: number, slowStart = true) {
+  constructor(max: number) {
     this.max = max;
-    this.slowStart = slowStart;
-    if (slowStart) this.enterSlowStart(Infinity);
+    this.enterSlowStart(Infinity);
   }
 
   private enterSlowStart(ssthresh: number): void {
@@ -153,7 +138,6 @@ export class RunAndTumble {
     this.cssSince = 0;
     this.round = { start: performance.now(), bw: 0, flat: false, busy: 0, ticks: 0 };
     this.capSince = 0;
-    this.firstRun = false;
     this.paceSlowStart();
   }
 
@@ -188,7 +172,7 @@ export class RunAndTumble {
 
   /** Nothing was sent for IDLE_RESTART_MS: start slowly again, up to the rate it had. */
   restartAfterIdle(): void {
-    if (this.slowStart && this.phase === "run-and-tumble") this.enterSlowStart(this.rate);
+    if (this.phase === "run-and-tumble") this.enterSlowStart(this.rate);
   }
 
   /**
@@ -306,14 +290,6 @@ export class RunAndTumble {
       return;
     }
     this.q = q;
-    if (this.firstRun && q > FIRST_RUN_EXIT_MS && this.window.delivered >= FIRST_RUN_EXIT_PACKETS) {
-      // the first run found the ceiling
-      this.firstRun = false;
-      this.dir = -1;
-      this.step = S_MIN;
-      this.change(1 / 1.5, now);
-      return;
-    }
     if (now < this.judgeAfter) return;                    // the last change is not visible yet
     if (q > Q_MAX_MS) {
       // The queue is out of hand: cut, then small steps. Once per round trip only: the queue
@@ -321,15 +297,13 @@ export class RunAndTumble {
       // the rate to the floor.
       this.dir = -1;
       this.step = S_MIN;
-      this.firstRun = false;
       this.change(0.7, now);
       this.cuts++;
       return;
     }
 
     const w = this.window;
-    // not enough evidence yet (the first run needs none: a queue forming ends it anyway)
-    if (!this.firstRun && w.delivered < MIN_JUDGE_PACKETS) return;
+    if (w.delivered < MIN_JUDGE_PACKETS) return;          // not enough evidence yet
     const appLimited = w.ticks > 0 && w.busy / w.ticks < 0.7;
     if (appLimited || w.ms <= 0) {                        // nothing to learn from an idle link
       this.resetWindow();
@@ -347,7 +321,6 @@ export class RunAndTumble {
       const pUp = 1 / (1 + Math.exp(BIAS * (q - this.lastQ)));                             // tumble
       this.dir = Math.random() < pUp ? 1 : -1;
       this.step = S_MIN;
-      this.firstRun = false;
       this.tumbles++;
     }
     this.lastScore = score;
@@ -358,9 +331,8 @@ export class RunAndTumble {
   private change(factor: number, now: number): void {
     this.rate = Math.min(this.max, Math.max(RATE_MIN, this.rate * factor));
     if (factor < 1 && this.dir > 0) this.dir = -1;
-    // a long run is judged after one report (a queue forming ends it on any report anyway);
-    // small steps after two, since one report is too noisy to judge 5%
-    this.judgeAfter = now + this.srtt + (this.firstRun ? 1 : 2) * REPORT_MS;
+    // judged after a round trip and two reports: one report is too noisy to judge 5%
+    this.judgeAfter = now + this.srtt + 2 * REPORT_MS;
     this.resetWindow();
   }
 

@@ -136,12 +136,11 @@ function build(image: PreparedImage, u: UnitId): Packets {
   return tileParts(u.level, u.x, u.y, file.format, readFileSync(file.path));
 }
 
-/** How the sending is controlled; the defaults are the protocol, the rest for comparison. */
+/** How the sending is controlled; the default is the protocol, the rest for comparison. */
 export interface SendOptions {
   window: boolean;        // false: no sliding window, rate only (--window off)
-  slowStart: boolean;     // false: open at a fixed 4 Mbit/s (--start fixed)
 }
-export const DEFAULT_SEND: SendOptions = { window: true, slowStart: true };
+export const DEFAULT_SEND: SendOptions = { window: true };
 
 const MIN_RTO_MS = 200;    // a packet unacknowledged this long (or 3 round trips) is lost
 const MAX_BACKOFF = 64;    // timeouts with no ACK between them double the timeout, up to this
@@ -218,7 +217,7 @@ export class Session {
   constructor(peer: Peer, images: Map<string, PreparedImage>, cache: PacketCache,
               send: (msg: Buffer) => void, maxRate: number, opts: SendOptions = DEFAULT_SEND) {
     this.opts = opts;
-    this.rc = new RunAndTumble(maxRate, opts.slowStart);
+    this.rc = new RunAndTumble(maxRate);
     this.peer = peer;
     this.images = images;
     this.cache = cache;

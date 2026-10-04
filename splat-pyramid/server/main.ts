@@ -17,7 +17,6 @@
 //            server's upload is shared equally when it is what binds)
 // --window   on (default) or off: the sliding window (congestion and receive windows) on
 //            top of the paced rate; off sends by rate alone, for comparison
-// --start    slow (default) or fixed: open with slow start, or at a fixed 4 Mbit/s
 // --cache    MB of prepared packets the server keeps for all sessions (default 128)
 // --impair   emulate the path toward each client: loss, delay, rate... (shared/emulator.ts)
 
@@ -45,7 +44,6 @@ const { values: args } = parseArgs({
     fixed: { type: "boolean", default: false },
     multi: { type: "string", default: "physarum" },
     window: { type: "string", default: "on" },
-    start: { type: "string", default: "slow" },
     cache: { type: "string", default: "128" },
   },
 });
@@ -77,8 +75,7 @@ const physarum = args.multi === "physarum" ? new Physarum() : null;
 cache.physarum = physarum;
 
 if (!["on", "off"].includes(args.window)) throw new Error("--window: on or off");
-if (!["slow", "fixed"].includes(args.start)) throw new Error("--start: slow or fixed");
-const sendOptions: SendOptions = { window: args.window === "on", slowStart: args.start === "slow" };
+const sendOptions: SendOptions = { window: args.window === "on" };
 
 // Incoming messages per client: a client sends one view per change and a report every 100 ms,
 // so anything far beyond that is not a viewer. Excess is dropped, never processed. ACKs have
@@ -216,6 +213,6 @@ setInterval(() => {
 }, 500);
 
 socket.bind(Number(args.port), () => {
-  console.log(`server on udp ${args.port}, ${args.rate} Mbit/s, window ${args.window}, start ${args.start}, images: ${[...images.keys()].join(", ")}`);
+  console.log(`server on udp ${args.port}, ${args.rate} Mbit/s, window ${args.window}, images: ${[...images.keys()].join(", ")}`);
   console.log(`path to clients: ${describe(downstream)}`);
 });
