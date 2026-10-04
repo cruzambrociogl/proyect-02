@@ -4,6 +4,10 @@ Gigapixel viewer: splats for the coarse zoom levels, exact image tiles near 1:1,
 over our own protocol on UDP. The design and the build order are in [PLAN.md](PLAN.md);
 everything built before v2 is in [prototype/](prototype/).
 
+The protocol document (Spanish): [docs/protocolo-sp.md](docs/protocolo-sp.md), also as
+[PDF](docs/protocolo-sp.pdf). Both are exported from the working copy in Claude Docs; edit
+there and export again rather than editing these files by hand.
+
 ## Run
 
 ```sh
