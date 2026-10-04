@@ -33,12 +33,18 @@ function pixelRatio(): number {
 /** The ratio the canvas actually has now (input positions and camera use this). */
 const canvasRatio = () => (canvas.clientWidth ? canvas.width / canvas.clientWidth : 1);
 /**
- * The closest zoom: one image pixel over this many screen (CSS) pixels, so it looks the same
- * on a phone, a laptop and a large monitor whatever the canvas's pixel budget. Past 1:1 there
- * is no new data, only magnification, so this costs nothing on the network.
+ * The closest zoom: one unit of the image's real detail over this many screen (CSS) pixels.
+ * The server measured how many image pixels make one unit of real detail (CHART detailScale,
+ * splatpyr/detail.py): 1 for text drawn a pixel wide, about 4 for a scan softer than its
+ * pixel count. So text can be magnified 16x and still show something, and a soft scan stops
+ * at about 4x, before its pixels turn to blur. Never closer than 1:1 would be is blocked. In
+ * screen pixels, so it feels the same on a phone, a laptop and a large monitor. Past 1:1
+ * there is no new data, only magnification, so this costs nothing on the network.
  */
-const MAX_MAGNIFY = 8;
-const maxZoom = () => MAX_MAGNIFY * canvasRatio();       // in canvas pixels per image pixel
+const MAX_MAGNIFY = 16;
+/** Screen pixels per image pixel at the closest zoom. */
+const magnifyLimit = () => Math.max(1, MAX_MAGNIFY / (M?.detailScale ?? 1));
+const maxZoom = () => magnifyLimit() * canvasRatio();    // in canvas pixels per image pixel
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
  * Everything the viewer holds, blobs and tiles together: the forgetting-curve cache (forgetting.ts)
@@ -57,7 +63,8 @@ const MEMORY_BUDGET = 32 * 2 ** 20;
 const STORE_BUDGET = 48 * 2 ** 20;
 const VIEW_EVERY_MS = 50;
 
-interface Chart { name: string; width: number; height: number; tile: number; maxLevel: number; split: number }
+interface Chart { name: string; width: number; height: number; tile: number; maxLevel: number; split: number;
+                  detailScale?: number }
 interface SplatUnit {
   L: number; x: number; y: number; mode: number; w: number; h: number;
   n: number; count: number; packets: number; got: Set<number>;
@@ -650,7 +657,7 @@ function frame(): void {
   statsEl.textContent =
     `image      ${c.name} ${c.width} x ${c.height}\n` +
     `link       ${linkState}\n` +
-    `level      ${deepest} drawn / ${finest} wanted (top ${c.maxLevel})\n` +
+    `level      ${deepest} drawn / ${finest} wanted (top ${c.maxLevel}), zoom ${(cam.z / canvasRatio()).toFixed(2)}x of ${magnifyLimit().toFixed(1)}x (detail ${c.detailScale ?? 1} px)\n` +
     `layers     splats ${c.maxLevel}..${c.split} first, tiles ${c.maxLevel}..0 at rest\n` +
     `units      ${base.length + detail.length} drawn, ${units.size} held, ${partial} partial\n` +
     `blobs      ${(drawnBlobs / 1e3).toFixed(0)}k drawn, ${(blobBytes / RECORD / 1e3).toFixed(0)}k held\n` +

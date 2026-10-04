@@ -133,6 +133,8 @@ def ingest(image_path, root, tile=256, split=None, splat_units=SPLAT_UNITS,
             "tile": tile, "max_level": top, "split": split, "tile_format": tile_format}
     with open(os.path.join(root, "pyramid.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    from .detail import measure
+    meta["detail_scale"] = measure(root, log=log)
     log(f"ingest done in {time.time() - started:.0f}s")
     return meta
 

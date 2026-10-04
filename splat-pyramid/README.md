@@ -235,6 +235,23 @@ reordered one no longer leaves the viewer waiting.
    magnification), so a frame never holds more than 2.8x the screen's pixels instead of 4x.
    Together they took the simulated peak from 51.5 MB to 31.5 MB.
 
+## How far zooming in goes
+
+An image's pixel count is not its resolution. At ingest, `splatpyr/detail.py` shrinks a sample
+of the finest tiles by 2, 4 and 8, enlarges them back, and finds where they stop coming back
+close (30 dB): the **detail scale**, image pixels per unit of real detail. The server sends it
+in CHART, and the viewer stops when one unit of real detail covers 16 screen pixels (never
+short of 1:1). `python3 -m splatpyr detail data/NAME` measures an image prepared before this.
+
+| image | 2x / 4x / 8x back (dB) | detail scale | zoom limit |
+|---|---|---|---|
+| bigbig.png (digits 1 px wide) | 9.5 / 7.8 / 7.7 | 1.00 | 16x |
+| Holbein (scan softer than its pixels) | 32.0 / 29.7 / 28.3 | 3.62 | 4.4x |
+| bills.jpg (enlarged photo) | 42.8 / 34.9 / 27.2 | 6.22 | 2.6x |
+
+Before, every image stopped at 8x: bigbig's digits could have gone further, and the Holbein
+turned to blur well before.
+
 ## v2 against v1
 
 `bench/versus.ts` runs both versions in the same headless Chrome with the same synthetic input

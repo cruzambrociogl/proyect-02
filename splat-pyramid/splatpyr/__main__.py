@@ -80,6 +80,10 @@ def main(argv=None):
                    help="budget of fitted units, for images ingested before splits existed")
     _fit_options(p)
 
+    p = sub.add_parser("detail", help="measure how much real detail the finest level holds "
+                                      "(how far the viewer zooms in); ingest does it too")
+    p.add_argument("out")
+
     p = sub.add_parser("serve", help="viewer and units, fitting on demand")
     p.add_argument("out")
     p.add_argument("--port", type=int, default=8080)
@@ -116,6 +120,9 @@ def main(argv=None):
         _apply_fit_options(args.out, args)
         build(args.out, finest=args.finest, workers=args.workers, split=args.split,
               splat_units=args.splat_units)
+    elif args.cmd == "detail":
+        from .detail import measure
+        measure(args.out)
     elif args.cmd == "serve":
         from .serve import serve
         serve(args.out, args.port, lazy=not args.no_lazy)
