@@ -14,7 +14,7 @@
 
 import { createSocket, type Socket } from "node:dgram";
 import {
-  Type, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeAck, encodeReport, encodeView, unitKey,
+  Type, VERSION, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeAck, encodeReport, versionOf, encodeView, unitKey,
   MAX_COUNTS, MAX_DATAGRAM, decodeCatalogPart, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
 } from "../shared/wire.ts";
 import { TILE_HEAD, TILE_PART, WIDTH_SPLAT, WIDTH_TILE, blockOfPacket, readTilePart } from "../shared/units.ts";
@@ -319,9 +319,20 @@ export class ClientLink {
     this.settle(b, isTile);
   }
 
+  private otherVersion = false;
+
   private onDatagram(datagram: Buffer): void {
     const m = decode(datagram);
-    if (!m) return;
+    if (!m) {
+      const v = versionOf(datagram);
+      if (v !== null && v !== VERSION && !this.otherVersion) {
+        this.otherVersion = true;
+        const why = `the server speaks protocol version ${v}, this client half ${VERSION}: update both to the same code`;
+        console.log(why);
+        this.events.fault?.(why);
+      }
+      return;
+    }
     this.received.packets++;
     this.received.bytes += datagram.length;
     this.interval.bytes += datagram.length;

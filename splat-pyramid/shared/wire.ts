@@ -68,6 +68,15 @@ export interface Message {
   payload: Buffer;
 }
 
+/**
+ * The protocol version a datagram of ours speaks, or null if it is not one of ours: so a side
+ * that cannot decode a message can say "the other side runs another version" instead of
+ * ignoring it in silence.
+ */
+export function versionOf(datagram: Buffer): number | null {
+  return datagram.length >= 3 && datagram[0] === 0x53 && datagram[1] === 0x50 ? datagram[2] : null;
+}
+
 /** A datagram to a message, or null if it is not one of ours. */
 export function decode(datagram: Buffer): Message | null {
   if (datagram.length < HEADER || datagram[0] !== 0x53 || datagram[1] !== 0x50) return null;

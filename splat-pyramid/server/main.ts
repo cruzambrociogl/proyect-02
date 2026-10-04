@@ -24,7 +24,7 @@ import { createSocket } from "node:dgram";
 import { parseArgs } from "node:util";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { Type, decode, encode, encodeCatalog, typeName } from "../shared/wire.ts";
+import { Type, VERSION, decode, encode, encodeCatalog, typeName, versionOf } from "../shared/wire.ts";
 import { EmulatedPath, describe, parseImpairment } from "../shared/emulator.ts";
 import { findImages } from "./image.ts";
 import { PacketCache, Session, type SendOptions } from "./session.ts";
@@ -100,10 +100,18 @@ const sessions = new Map<string, Session>();
 const paths = new Map<string, EmulatedPath>();
 const socket = createSocket("udp4");
 
+const otherVersions = new Set<string>();
 socket.on("message", (datagram, rinfo) => {
   const m = decode(datagram);
-  if (!m) return;
   const key = `${rinfo.address}:${rinfo.port}`;
+  if (!m) {
+    const v = versionOf(datagram);
+    if (v !== null && v !== VERSION && !otherVersions.has(key)) {
+      otherVersions.add(key);
+      console.log(`${key} speaks protocol version ${v}, this server ${VERSION}: update the client half`);
+    }
+    return;
+  }
   if (!admit(key, m.type === Type.ACK)) return;
   if (m.type === Type.LIST) {                    // needs no session: the gallery asks before opening
     for (const part of catalog()) socket.send(encode(Type.CATALOG, m.epoch, part), rinfo.port, rinfo.address);

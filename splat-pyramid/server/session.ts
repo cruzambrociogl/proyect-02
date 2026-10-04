@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import {
-  HEADER, MAX_DATAGRAM, Type, KIND_SPLAT, KIND_TILE, clockMs, decodeAck, decodeReport, decodeView, encode, encodeRepair, unitKey,
+  HEADER, Type, KIND_SPLAT, KIND_TILE, clockMs, decodeAck, decodeReport, decodeView, encode, encodeRepair, unitKey,
   type Message, type UnitId, type View,
 } from "../shared/wire.ts";
 import { WIDTH_SPLAT, WIDTH_TILE, confetti, readSpx, tileParts, type Packets } from "../shared/units.ts";
@@ -410,11 +410,6 @@ export class Session {
       return false;
     }
     return true;
-  }
-
-  /** Whether the window has room for one more packet, for the pacing loop. */
-  get windowBlocked(): boolean {
-    return this.opts.window && !this.windowOpen(MAX_DATAGRAM);
   }
 
   /**
