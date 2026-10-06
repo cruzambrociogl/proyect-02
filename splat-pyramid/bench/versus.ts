@@ -86,9 +86,9 @@ async function servers(version: "v1" | "v2", spec: string): Promise<{ procs: Chi
   }
   const s = await start(process.execPath, ["server/main.ts", "--images", "data", "--impair", spec], ROOT, "server on udp");
   const c = await start(process.execPath, ["client/main.ts"], ROOT, "viewer on");
-  await answering("http://127.0.0.1:8090/");
+  await answering("http://127.0.0.1:8000/");
   const fit = Math.max(IMAGE_W / CW, IMAGE_H / CH);          // v1's starting view
-  return { procs: [s, c], url: `http://127.0.0.1:8090/?image=${encodeURIComponent(args.image)}#x=${IMAGE_W / 2}&y=${IMAGE_H / 2}&z=${1 / fit}` };
+  return { procs: [s, c], url: `http://127.0.0.1:8000/view?image=${encodeURIComponent(args.image)}#x=${IMAGE_W / 2}&y=${IMAGE_H / 2}&z=${1 / fit}` };
 }
 
 class Cdp {

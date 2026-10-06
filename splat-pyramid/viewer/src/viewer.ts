@@ -375,17 +375,23 @@ function reviveTile(L: number, x: number, y: number): boolean {
 // connection
 // ---------------------------------------------------------------------------------------
 
-const imageName = new URLSearchParams(location.search).get("image") ?? "";
-let linkState = "connecting";
-// wss when the page came over https (a tunnel, a proxy): browsers block ws from an https page
-const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+const query = new URLSearchParams(location.search);
+const imageName = query.get("image") ?? "";
+// The page comes from the server's site over HTTP; the image comes through the client half on
+// this machine, over a local WebSocket (127.0.0.1 is allowed even from an https page)
+const clientHalf = query.get("client") ?? "127.0.0.1:8090";
+let linkState = `connecting to the client half at ${clientHalf}`;
+const ws = new WebSocket(`ws://${clientHalf}/ws`);
 ws.binaryType = "arraybuffer";
 ws.onopen = () => {
   linkState = "waiting for server";
   if (!imageName) fail("add ?image=NAME to the address");
   ws.send(JSON.stringify({ type: "open", image: imageName }));
 };
-ws.onclose = () => { linkState = "closed"; dirty = true; };
+ws.onclose = () => {
+  linkState = M ? "closed" : `no client half at ${clientHalf}: run node client/main.ts --server <server>:9000`;
+  dirty = true;
+};
 ws.onmessage = (e) => {
   if (typeof e.data === "string") {
     const m = JSON.parse(e.data);

@@ -1,6 +1,11 @@
-// The server site: what is served, adding images, preparing them.
+// The server site, over HTTP: every file the browser loads, and adding and preparing images.
+// The image itself never travels here: it goes over our protocol, through the client half
+// on the viewer's machine, which the pages reach on a local WebSocket.
 //
-//   GET    /                       the page (server/admin.html)
+//   GET    /                       the image list (viewer/gallery.html)
+//   GET    /view?image=NAME        the viewer (viewer/index.html)
+//   GET    /NAME.js                the viewer's compiled modules (viewer/dist)
+//   GET    /admin                  adding and preparing images (server/admin.html)
 //   GET    /api/images             every image: its original, whether it is prepared, progress
 //   POST   /api/upload?name=FILE   the request body is the file, streamed to --originals
 //   POST   /api/prepare?name=FILE  queue its preparation (splatpyr ingest, then build)
@@ -141,9 +146,21 @@ export function startAdmin(o: AdminOptions): void {
       res.writeHead(code, { "Content-Type": "application/json", "Cache-Control": "no-cache" }).end(JSON.stringify(body));
     };
     try {
+      const page = (file: string) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8",
+                                                          "Cache-Control": "no-cache" }).end(readFileSync(file));
+      const script = /^\/([\w-]+\.js)$/.exec(url.pathname);
       if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" })
-           .end(readFileSync(join(import.meta.dirname, "admin.html")));
+        page(join(o.root, "viewer", "gallery.html"));
+      } else if (req.method === "GET" && url.pathname === "/view") {
+        page(join(o.root, "viewer", "index.html"));
+      } else if (req.method === "GET" && url.pathname === "/admin") {
+        page(join(import.meta.dirname, "admin.html"));
+      } else if (req.method === "GET" && script) {
+        const dist = join(o.root, "viewer", "dist"), file = join(dist, script[1]);
+        if (!existsSync(dist)) return void res.writeHead(500, { "Content-Type": "text/plain" }).end('run "npm run build" first');
+        if (!existsSync(file)) return void res.writeHead(404).end("not found");
+        res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" })
+           .end(readFileSync(file));
       } else if (req.method === "GET" && url.pathname === "/api/images") {
         json(200, { images: list(), queue, originals: o.originals, data: o.data });
       } else if (req.method === "POST" && url.pathname === "/api/upload") {
@@ -184,7 +201,8 @@ export function startAdmin(o: AdminOptions): void {
       json(500, { error: String(e) });
     }
   });
-  server.listen(o.port, () => console.log(`server site on http://localhost:${o.port}/ (originals: ${o.originals})`));
+  server.listen(o.port, () => console.log(`server site on http://localhost:${o.port}/ (images), ` +
+                                          `http://localhost:${o.port}/admin (add and prepare; originals: ${o.originals})`));
 }
 
 function folderBytes(dir: string): number {

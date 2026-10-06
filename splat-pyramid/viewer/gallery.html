@@ -25,30 +25,44 @@
 </style>
 </head>
 <body>
-<header><h1>Not a gallery</h1><span id="sub">the images the server has ready</span></header>
+<header><h1>Not a gallery</h1><span id="sub">the images the server has ready</span><a href="/admin" style="margin-left:auto;color:var(--accent);text-decoration:none">add images</a></header>
 <main><div class="grid" id="grid"></div><div class="note" id="note">asking the server…</div></main>
 <script>
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// The page comes from the server's site; the list of images comes over our protocol (LIST,
+// CATALOG), asked through the client half on this machine.
+const client = new URLSearchParams(location.search).get("client") ?? "127.0.0.1:8090";
+const withClient = client === "127.0.0.1:8090" ? "" : `&client=${encodeURIComponent(client)}`;
+function catalog() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${client}/catalog`);
+    let done = false;
+    ws.onmessage = (e) => {
+      done = true;
+      const m = JSON.parse(e.data);
+      m.type === "catalog" ? resolve(m) : reject(new Error(m.message));
+    };
+    ws.onclose = () => { if (!done) reject(new Error(`no client half at ${client}: run node client/main.ts --server <server>:9000`)); };
+  });
+}
 let last = "";
 async function refresh() {
   try {
-    const r = await fetch("/api/catalog");
-    if (!r.ok) throw new Error(await r.text());
-    const c = await r.json();
+    const c = await catalog();
     const text = JSON.stringify(c.images);
     if (text === last) return;                    // nothing changed: keep the page as it is
     last = text;
     document.getElementById("note").textContent = c.images.length ? "" :
       "No images ready yet. Upload and prepare some on the server site.";
     document.getElementById("grid").innerHTML = c.images.map((i) => `
-      <a class="card" href="/?image=${encodeURIComponent(i.name)}">
+      <a class="card" href="/view?image=${encodeURIComponent(i.name)}${withClient}">
         <div class="thumb" style="background-image:url('/thumb/${encodeURIComponent(i.name)}')"></div>
         <div class="info"><div class="name">${esc(i.name)}</div>
           <div class="meta">${i.width.toLocaleString()} × ${i.height.toLocaleString()} px · ${(i.width * i.height / 1e6).toFixed(0)} Mpx</div>
           <div class="meta">${i.maxLevel + 1} levels · splats ${i.maxLevel}–${i.split}, tiles at every level</div></div>
       </a>`).join("");
   } catch (e) {
-    document.getElementById("note").textContent = `Cannot reach the server: ${e.message}`;
+    document.getElementById("note").textContent = e.message;
   }
 }
 refresh();

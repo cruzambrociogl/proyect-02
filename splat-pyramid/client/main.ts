@@ -1,11 +1,19 @@
 // The client half: runs on the viewer's machine, because a browser cannot open a UDP
 // socket. It speaks our protocol to the server (client/link.ts) and hands the browser what
-// arrives, over a WebSocket on loopback. It also serves the viewer page.
+// arrives, over a WebSocket on loopback. It serves no pages: the browser loads them from the
+// server's site over HTTP, and they connect here.
 //
-//   node client/main.ts [--server 127.0.0.1:9000] [--port 8090] [--impair SPEC]
-//   then open http://127.0.0.1:8090/ (the gallery) or http://127.0.0.1:8090/?image=NAME
+//   node client/main.ts [--server 127.0.0.1:9000] [--port 8090] [--impair SPEC] [--origins A,B]
+//   then open the server's site, http://SERVER:8000/ (this port redirects there)
 //
-// --impair emulates the path toward the server (views, reports); see shared/emulator.ts.
+// --impair  emulates the path toward the server (views, reports); see shared/emulator.ts.
+// --origins hosts whose pages may connect, besides the server's host and this machine
+//           (a page from any other site is refused: it could otherwise drive this session)
+//
+// Two WebSockets:
+//   /ws       the viewer's session: one at a time (a new page takes over)
+//   /catalog  the image list asks for the catalog (LIST/CATALOG over our protocol); answers
+//             {type: "catalog", images, site} or {type: "fault", message}, then closes
 //
 // Browser -> client half (JSON text):
 //   {type: "open", image}                         open an image
@@ -17,9 +25,7 @@
 //   binary [1] + CONFETTI payload                 some blobs of a splat unit, as they land
 //   binary [2] + level u8, x u32, y u32, format u8, bytes   a whole image tile
 
-import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
 import { describe, parseImpairment } from "../shared/emulator.ts";
@@ -30,9 +36,9 @@ const { values: args } = parseArgs({
     server: { type: "string", default: "127.0.0.1:9000" },
     port: { type: "string", default: "8090" },
     impair: { type: "string", default: "none" },
+    origins: { type: "string", default: "" },
   },
 });
-const VIEWER = join(import.meta.dirname, "..", "viewer");
 const upstream = parseImpairment(args.impair);
 const link = new ClientLink(args.server, upstream);
 let browser: WebSocket | null = null;
@@ -67,44 +73,48 @@ link.events = {
   },
 };
 
-// The pages and the WebSocket share one port:
-//   /                 the gallery: the images the server has ready
-//   /?image=NAME      the viewer on one of them
-//   /api/catalog      the gallery's list, asked of the server over our protocol (LIST)
-//   /thumb/NAME       a preview, fetched from the server site (the only thing not over UDP)
-//   /*.js             the compiled viewer's modules
+// Which pages may connect: the server's site, this machine, and --origins. Browsers send the
+// page's origin with a WebSocket handshake; anything else is refused.
 const serverHost = args.server.split(":")[0];
 let site = 8000;                                   // the server site's port, learned from CATALOG
-const http = createServer(async (req, res) => {
-  const url = new URL(req.url ?? "/", "http://x");
-  const send = (code: number, type: string, body: string | Buffer) =>
-    res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-cache" }).end(body);
-  try {
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      const page = url.searchParams.has("image") ? "index.html" : "gallery.html";
-      return send(200, "text/html; charset=utf-8", readFileSync(join(VIEWER, page)));
-    }
-    if (url.pathname === "/api/catalog") {
-      const c = await link.list();
-      if (typeof c.site === "number") site = c.site;
-      return send(200, "application/json", JSON.stringify(c));
-    }
-    if (url.pathname.startsWith("/thumb/")) {
-      const r = await fetch(`http://${serverHost}:${site}${url.pathname}`);
-      if (!r.ok) return send(404, "text/plain", "no preview");
-      return send(200, r.headers.get("content-type") ?? "image/png", Buffer.from(await r.arrayBuffer()));
-    }
-    const script = /^\/([\w-]+\.js)$/.exec(url.pathname);
-    if (script) return send(200, "text/javascript; charset=utf-8", readFileSync(join(VIEWER, "dist", script[1])));
-    send(404, "text/plain", "not found");
-  } catch (e) {
-    const missing = String(e).includes("ENOENT") && url.pathname.endsWith(".js");
-    send(missing ? 500 : 502, "text/plain", missing ? 'run "npm run build" first' : String(e));
-  }
+const allowed = new Set(["127.0.0.1", "localhost", "[::1]", serverHost,
+                         ...args.origins.split(",").map((s) => s.trim()).filter(Boolean)]);
+function originAllowed(origin: string | undefined): boolean {
+  if (!origin) return true;                        // not a browser (a test client)
+  try { return allowed.has(new URL(origin).hostname); } catch { return false; }
+}
+
+// HTTP here only points the browser at the server's site, where the pages are.
+const http = createServer((req, res) => {
+  res.writeHead(302, { Location: `http://${serverHost}:${site}/${args.port === "8090" ? "" : `?client=127.0.0.1:${args.port}`}` }).end();
 });
 
-const wss = new WebSocketServer({ server: http, path: "/ws" });
-wss.on("connection", (ws) => {
+const sessions = new WebSocketServer({ noServer: true });
+const catalogs = new WebSocketServer({ noServer: true });
+http.on("upgrade", (req, socket, head) => {
+  const path = new URL(req.url ?? "/", "http://x").pathname;
+  if (!originAllowed(req.headers.origin)) {
+    console.log(`refused a page from ${req.headers.origin} (allow it with --origins)`);
+    socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    return;
+  }
+  const wss = path === "/ws" ? sessions : path === "/catalog" ? catalogs : null;
+  if (!wss) { socket.end("HTTP/1.1 404 Not Found\r\n\r\n"); return; }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+});
+
+catalogs.on("connection", async (ws) => {
+  try {
+    const c = await link.list();
+    if (typeof c.site === "number") site = c.site;
+    ws.send(JSON.stringify({ type: "catalog", ...c }));
+  } catch (e) {
+    ws.send(JSON.stringify({ type: "fault", message: String(e instanceof Error ? e.message : e) }));
+  }
+  ws.close();
+});
+
+sessions.on("connection", (ws) => {
   if (browser) browser.close(1000, "another viewer took over this client half");
   browser = ws;
   forwarded = consumed = 0;
@@ -127,7 +137,9 @@ wss.on("connection", (ws) => {
 });
 
 await link.bind();
+// learn the server site's port (CATALOG carries it), for the redirect; nothing depends on it
+link.list().then((c) => { if (typeof c.site === "number") site = c.site; }, () => {});
 http.listen(Number(args.port), "127.0.0.1", () => {
   console.log(`client half: server ${args.server}, path to server: ${describe(upstream)}`);
-  console.log(`gallery on http://127.0.0.1:${args.port}/ (viewer on http://127.0.0.1:${args.port}/?image=NAME)`);
+  console.log(`pages connect on ws://127.0.0.1:${args.port}; open the server's site: http://${serverHost}:${site}/`);
 });

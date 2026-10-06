@@ -19,15 +19,22 @@ node server/main.ts                             # server: UDP 9000, server site 
 node client/main.ts --server 127.0.0.1:9000     # client half, on the viewer's machine
 ```
 
-**Server site**, http://localhost:8000/: upload images (streamed to disk, any size) or drop
-them into `originals/`, press **Prepare** (the Python preprocessing runs in the background,
-one image at a time, with its progress on the page), and see what is being served. Prepared
-images go to `data/` and are served as soon as they are ready.
+Everything the browser loads comes from the **server site** over HTTP; the image itself comes
+over our protocol, through the client half, which the pages reach on a local WebSocket
+(`ws://127.0.0.1:8090`). The client half serves no pages: its own address redirects to the
+server site.
 
-**Client site**, http://127.0.0.1:8090/: the gallery of the images the server has ready
-(the list travels over our protocol, LIST and CATALOG; only the thumbnails come from the
-server site over HTTP). Click one to open it in the viewer, or go straight to
-`/?image=NAME`. `#x=..&y=..&z=..` in the address opens on a spot.
+- http://localhost:8000/ : the images the server has ready (the list travels over our
+  protocol, LIST and CATALOG, through the client half; the thumbnails come over HTTP).
+  Click one to open it in the viewer, or go straight to `/view?image=NAME`.
+  `#x=..&y=..&z=..` in the address opens on a spot.
+- http://localhost:8000/admin : upload images (streamed to disk, any size) or drop them into
+  `originals/`, press **Prepare** (the Python preprocessing runs in the background, one
+  image at a time, with its progress on the page), and see what is being served. Prepared
+  images go to `data/` and are served as soon as they are ready.
+
+A client half on another port: add `?client=127.0.0.1:PORT` to the page's address. It only
+accepts pages from the server's host and this machine (`--origins` adds others).
 
 Server options: `--images data`, `--originals originals`, `--http 8000`, `--port 9000`,
 `--python python3` (the Python with the preprocessing's requirements), `--rate 50` (upload
