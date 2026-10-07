@@ -28,6 +28,7 @@ export interface Chart {
   split: number;       // levels split..maxLevel are splats, below are image tiles
   detailScale: number; // image pixels per unit of real detail (splatpyr/detail.py): how far
                        // zooming in is worth it; 1 when every pixel matters
+  lossless: boolean;   // the finest tiles are mostly lossless WebP: text or line art, not a photo
 }
 
 export class PreparedImage {
@@ -43,7 +44,8 @@ export class PreparedImage {
       split = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")).split;
     }
     this.chart = { name, width: meta.width, height: meta.height, tile: meta.tile,
-                   maxLevel: meta.max_level, split: split ?? 0, detailScale: meta.detail_scale ?? 1 };
+                   maxLevel: meta.max_level, split: split ?? 0, detailScale: meta.detail_scale ?? 1,
+                   lossless: (meta.lossless_share ?? 1) >= 0.5 };
   }
 
   levelSize(level: number): [number, number] {

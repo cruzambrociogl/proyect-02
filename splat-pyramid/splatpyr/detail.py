@@ -46,6 +46,10 @@ def measure(root, log=print):
     level0 = os.path.join(root, "tiles", "0")
     names = sorted(os.listdir(level0)) if os.path.isdir(level0) else []
     random.Random(1).shuffle(names)
+    # what the finest tiles were kept as: lossless WebP is text and line art (drawn as exact
+    # pixels when magnified), JPEG is a photograph (smoothed, and zoomed less far)
+    kinds = [n.rsplit(".", 1)[-1] for n in names[:1000]]
+    lossless = round(kinds.count("webp") / len(kinds), 3) if kinds else None
     scores = {k: [] for k in FACTORS}
     used = 0
     for name in names:
@@ -79,11 +83,13 @@ def measure(root, log=print):
                 scale = 2 ** (np.log2(last_k) + frac * (np.log2(k) - np.log2(last_k)))
             break
     meta["detail_scale"] = round(scale, 2)
+    meta["lossless_share"] = lossless
     meta["detail_psnr"] = {str(k): round(v, 1) for k, v in medians.items()}
     meta.pop("detail_level", None)
     with open(os.path.join(root, "pyramid.json"), "w") as f:
         json.dump(meta, f, indent=2)
     shown = ", ".join(f"{k}x {v:.1f} dB" for k, v in medians.items())
     log(f"detail: scale {scale:.2f} image px per unit of real detail ({used} tiles; shrunk and "
-        f"enlarged back: {shown or 'nothing to measure'})")
+        f"enlarged back: {shown or 'nothing to measure'}); lossless tiles: "
+        f"{'?' if lossless is None else f'{lossless:.0%}'}")
     return scale

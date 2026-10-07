@@ -24,8 +24,13 @@ const RECORD = 11, CONFETTI_HEAD = 29;          // must match shared/units.ts
  * evicted what the next frame needed and fetched it again (104.8 MB received in a test). At 1x
  * a 3x phone looked soft, stretched 3x by the browser. The budget gives a phone 2x (its
  * screen is small) and a large screen about 1x.
+ *
+ * 3.4 MP lets a 2x laptop draw at its full resolution (2560 x 1280 for 1280 x 640 CSS pixels)
+ * instead of being stretched 1.28x, which left photos jagged next to ESO's own viewer. Measured
+ * on the ESO image, zooming to 1:1 and 40 drags: 20.0 MB received against 17.7, 419 evictions
+ * against 294, memory held at the 32 MB budget either way, about 20 MB more for the targets.
  */
-const CANVAS_PIXELS = 2_000_000;
+const CANVAS_PIXELS = 3_400_000;
 function pixelRatio(): number {
   const css = Math.max(1, canvas.clientWidth * canvas.clientHeight);
   return Math.max(1, Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(CANVAS_PIXELS / css)));
@@ -40,10 +45,18 @@ const canvasRatio = () => (canvas.clientWidth ? canvas.width / canvas.clientWidt
  * at about 4x, before its pixels turn to blur. Never closer than 1:1 would be is blocked. In
  * screen pixels, so it feels the same on a phone, a laptop and a large monitor. Past 1:1
  * there is no new data, only magnification, so this costs nothing on the network.
+ *
+ * A photograph stops at PHOTO_MAGNIFY whatever the measurement says: its stars, grain and
+ * noise measure as detail (the ESO image, like the digits, keeps detail at every pixel), but
+ * past a few times its own pixels it only shows them bigger. (ESO's own viewer stops at 2x.)
  */
 const MAX_MAGNIFY = 16;
+const PHOTO_MAGNIFY = 4;
 /** Screen pixels per image pixel at the closest zoom. */
-const magnifyLimit = () => Math.max(1, MAX_MAGNIFY / (M?.detailScale ?? 1));
+const magnifyLimit = () => {
+  const byDetail = Math.max(1, MAX_MAGNIFY / (M?.detailScale ?? 1));
+  return M?.lossless === false ? Math.min(PHOTO_MAGNIFY, byDetail) : byDetail;
+};
 const maxZoom = () => magnifyLimit() * canvasRatio();    // in canvas pixels per image pixel
 const LEVEL_BIAS = 0.25;                   // must match server/image.ts: which level a view draws
 /**
@@ -64,7 +77,7 @@ const STORE_BUDGET = 48 * 2 ** 20;
 const VIEW_EVERY_MS = 50;
 
 interface Chart { name: string; width: number; height: number; tile: number; maxLevel: number; split: number;
-                  detailScale?: number }
+                  detailScale?: number; lossless?: boolean }
 interface SplatUnit {
   L: number; x: number; y: number; mode: number; w: number; h: number;
   n: number; count: number; packets: number; got: Set<number>;
@@ -438,6 +451,11 @@ function connect(): void {
           M = m as Chart;
           cache = new ForgettingCache(MEMORY_BUDGET, M.maxLevel);
           needFit = true;
+          // text is drawn as exact pixels when magnified, a photograph smoothed (the box
+          // still overrides it)
+          ui.exact = M.lossless !== false;
+          (document.getElementById("exact") as HTMLInputElement).checked = ui.exact;
+          applyCanvasScaling();
         }
         lastSent = "";
         dirty = true;
@@ -816,7 +834,10 @@ for (const id of ["detail", "tiles", "exact"] as const) {
   el.addEventListener("input", () => { ui[id] = el.checked; applyCanvasScaling(); dirty = true; });
 }
 
-/** Past 1:1 on a high-density screen the browser scales the canvas up: no smoothing either. */
+/**
+ * The browser stretches the canvas to the screen when the canvas has fewer pixels (the pixel
+ * budget): as blocks for exact pixels, smoothed otherwise, so a photo does not turn jagged.
+ */
 function applyCanvasScaling(): void {
   canvas.style.imageRendering = ui.exact ? "pixelated" : "auto";
 }
