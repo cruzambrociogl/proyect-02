@@ -178,8 +178,55 @@ def _ingest_pil(image_path, root, tile, top, split, quality, tile_format, log):
     _write_levels(im, root, tile, 0, top, split, quality, tile_format, log)
 
 
+def _psd_open(path):
+    """A Photoshop file (PSD, or PSB for large documents) whose merged image is stored
+    uncompressed, opened without decoding anything: its pixels sit in the file as one plane
+    per channel (all the red, then all the green, then all the blue), so each plane is read
+    straight from its offset and the three are joined. Streams like any other format, at any
+    size. None for anything else (compressed, CMYK, other depths): libvips then goes through
+    ImageMagick, which works but loads the whole image first (hours, and a pixel cache of
+    16 bytes a pixel, for an image of billions of pixels)."""
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(26)
+        if len(head) < 26:
+            return None
+        sig, version, _, channels, height, width, depth, mode = struct.unpack(">4sH6sHIIHH", head)
+        if sig != b"8BPS" or version not in (1, 2):
+            return None
+        # colour mode data and image resources: 4-byte lengths; layer and mask information:
+        # 8 bytes in a PSB (version 2), 4 in a PSD
+        for size in (">I", ">I", ">Q" if version == 2 else ">I"):
+            n = struct.unpack(size, f.read(struct.calcsize(size)))[0]
+            f.seek(n, 1)
+        data = f.tell()
+        compression = struct.unpack(">H", f.read(2))[0]
+    if compression != 0 or depth not in (8, 16) or mode not in (1, 3):      # raw grey or RGB only
+        return None
+    bands = 3 if mode == 3 else 1
+    if channels < bands:
+        return None
+    # the file is mapped, not read: the system pages in only what is used. (libvips' own raw
+    # loader cannot start a plane past about 4 GB into the file, and a large image's green and
+    # blue planes start much further in, so the planes come from a memory map instead)
+    import numpy as np
+    mapped = np.memmap(path, dtype=np.uint8 if depth == 8 else np.uint16, mode="r", offset=data + 2,
+                       shape=(bands, height, width))
+    planes = []
+    for c in range(bands):
+        # new_from_memory keeps a reference to the buffer, and the buffer to the map
+        p = pyvips.Image.new_from_memory(mapped[c].data, width, height, 1, "uchar" if depth == 8 else "ushort")
+        # Photoshop stores numbers big-endian: 16-bit samples are swapped as they are read
+        planes.append(p.byteswap() if depth == 16 else p)
+    img = planes[0].bandjoin(planes[1:]) if bands > 1 else planes[0]
+    names = {(3, 8): "srgb", (3, 16): "rgb16", (1, 8): "b-w", (1, 16): "grey16"}
+    return img.copy(interpretation=names[(bands, depth)])
+
+
 def _vips_open(path):
-    img = pyvips.Image.new_from_file(path, access="sequential")
+    img = _psd_open(path) if path.lower().endswith((".psd", ".psb")) else None
+    if img is None:
+        img = pyvips.Image.new_from_file(path, access="sequential")
     if img.hasalpha():
         img = img.flatten()
     if img.bands < 3 or img.interpretation not in ("srgb", "rgb") or img.format != "uchar":
@@ -187,6 +234,37 @@ def _vips_open(path):
     if img.format != "uchar":
         img = img.cast("uchar")
     return img[:3] if img.bands > 3 else img
+
+
+def _sample_formats(image_path, tile, suffixes, log, rows=4, sample=64):
+    """For "auto": which tile formats are worth cutting for this image. Each format is a
+    whole pass over the image and a whole set of tiles on disk until each tile keeps the
+    smaller, so a format that (almost) never wins is not cut at all: a photograph never
+    keeps lossless WebP (the ESO image: 130 KB against 34 KB of JPEG), digits drawn 1 px
+    wide always do. Decided on up to `sample` tiles from the top `rows` tile rows, the only
+    part a streamed PNG can give cheaply. Near-flat tiles are skipped: they pick WebP
+    whatever the image is."""
+    img = _vips_open(image_path)
+    rows, cols = min(rows, img.height // tile), img.width // tile
+    if rows == 0 or cols == 0:
+        return "auto"
+    band = img.crop(0, 0, cols * tile, rows * tile).copy_memory()        # decoded once
+    total = rows * cols
+    webp = counted = 0
+    for i in range(min(sample, total)):
+        k = i * total // min(sample, total)
+        t = band.crop((k % cols) * tile, (k // cols) * tile, tile, tile)
+        if t.deviate() < 2:
+            continue
+        jpg = len(t.write_to_buffer(suffixes["jpg"]))
+        lossless = len(t.write_to_buffer(suffixes["webp"]))
+        webp += _choose(jpg, lossless) == "webp"
+        counted += 1
+    if counted < 8:
+        return "auto"
+    choice = "jpg" if webp <= 0.02 * counted else "webp" if webp >= 0.98 * counted else "auto"
+    log(f"  tile format: {choice} ({webp} of {counted} sample tiles from the top would keep lossless WebP)")
+    return choice
 
 
 def _ingest_vips(image_path, root, tile, top, split, quality, tile_format, log):
@@ -197,6 +275,8 @@ def _ingest_vips(image_path, root, tile, top, split, quality, tile_format, log):
         t0 = time.time()
         suffixes = {"jpg": f".jpg[Q={quality},keep=none]",
                     "webp": ".webp[lossless=true,effort=1,keep=none]"}
+        if tile_format == "auto":
+            tile_format = _sample_formats(image_path, tile, suffixes, log)
         formats = ["jpg", "webp"] if tile_format == "auto" else [tile_format]
         runs = {}
         for ext in formats:

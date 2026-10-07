@@ -23,7 +23,7 @@ import { createServer } from "node:http";
 import { basename, join } from "node:path";
 import { isReady } from "./image.ts";
 
-const IMAGE_EXT = /\.(jpe?g|png|tiff?|webp)$/i;
+const IMAGE_EXT = /\.(jpe?g|png|tiff?|webp|psd|psb)$/i;
 
 interface Job {
   name: string;
@@ -184,7 +184,7 @@ export function startAdmin(o: AdminOptions): void {
       } else if (req.method === "GET" && url.pathname === "/api/images") {
         json(200, { images: list(), queue, originals: o.originals, data: o.data });
       } else if (req.method === "POST" && url.pathname === "/api/upload") {
-        if (!name || !IMAGE_EXT.test(name)) return json(400, { error: "name must be a file name ending in .jpg, .png, .tif or .webp" });
+        if (!name || !IMAGE_EXT.test(name)) return json(400, { error: "name must be a file name ending in .jpg, .png, .tif, .webp, .psd or .psb" });
         const target = join(o.originals, name), part = `${target}.part`;
         const out = createWriteStream(part);
         req.pipe(out);
