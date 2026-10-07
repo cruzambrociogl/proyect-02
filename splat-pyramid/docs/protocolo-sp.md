@@ -16,26 +16,26 @@ Los mecanismos de control combinan adaptaciones de TCP (RFC 9293) con algoritmos
 - **Control de congestión**: *slow start* con salida estilo HyStart++ y luego *run-and-tumble*, un controlador inspirado en la quimiotaxis bacteriana.
 - **Varios usuarios y caché**: modelo *Physarum* (moho mucilaginoso) en el servidor y *curva del olvido* de Ebbinghaus en el navegador.
 
-Las imágenes de evaluación de 17, 28, 55 y 93 GB están preparadas y se sirven; la de 93 GB (176,393 × 176,393 px) se preparó en unos 21 minutos. Con la de 17 GB, una vista a resolución completa queda nítida en 0.08 s en LAN, 0.51 s en un enlace doméstico y 2.3 s en un enlace móvil con pérdida en ráfagas, sin superar 32 MB de memoria de imagen en el navegador. Tres usuarios moviéndose a la vez sobre la de 93 GB ven los dígitos nítidos 2 s después de detenerse.
+Las imágenes de evaluación de 17, 24, 28, 55 y 93 GB están preparadas y se sirven. Con la de 17 GB, una vista a resolución completa queda nítida en 0.08 s en LAN, 0.51 s en un enlace doméstico y 2.3 s en uno móvil con pérdida en ráfagas, sin superar 32 MB de memoria de imagen en el navegador.
 
 ## 2. El problema
 
 Una imagen de cientos de gigapíxeles no puede enviarse completa al navegador: el ancho de banda, la memoria y el tiempo de espera no lo permiten, y la mayor parte nunca se vería. El proyecto exige transferir solo lo que la vista actual necesita, añadiendo y eliminando información al acercar y alejar; no es un zoom del lado del cliente.
 
-Requisitos que guían el diseño (enunciado y correo del curso):
+Requisitos que guían el diseño (enunciado y correo del curso) y cómo se cumple cada uno:
 
-| # | Requisito | Origen |
+| # | Requisito | Cómo se cumple |
 | --- | --- | --- |
-| R1 | Atender a varios clientes a la vez | Enunciado, punto 1 |
-| R2 | Protocolo propio que controle la resolución de cada cliente | Enunciado, punto 2 |
-| R3 | Interfaz en HTML, JS y CSS, sin solicitudes a servidores externos | Enunciado, puntos 3 a 5 |
-| R4 | Agregar imágenes nuevas al servidor | Enunciado, punto 6 |
-| R5 | No servir la imagen completa; el servidor decide qué enviar | Enunciado, punto 7 |
-| R6 | El cliente gestiona lo cargado para no sobrecargar el navegador | Enunciado, punto 8 |
-| R7 | HTTP para los archivos iniciales; protocolo propio para la imagen, documentado | Enunciado |
-| R8 | Control y recuperación inspirados en mecanismos como Selective Repeat, SACK, ventana deslizante, control de flujo, control de congestión y slow start | Correo del curso |
-| R9 | No dejar al usuario desatendido; los números de la imagen de prueba deben leerse con claridad | Correo del curso |
-| R10 | Funcionar con imágenes de 17, 28, 55 y 93 GB | Correo del curso |
+| R1 | Atender a varios clientes a la vez | Una sesión por página, caché de paquetes compartida y Physarum (8.1). Tres usuarios moviéndose a la vez sobre la imagen de 93 GB: los tres nítidos 2 s después de detenerse |
+| R2 | Protocolo propio que controle la resolución de cada cliente | `VIEW` con época y un plan de envío por vista: el servidor decide unidades, orden y ritmo de cada cliente (5 y 6) |
+| R3 | Interfaz en HTML, JS y CSS, sin solicitudes a servidores externos | HTML, CSS y JavaScript propios, WebGL2 sin bibliotecas externas; funciona sin internet |
+| R4 | Agregar imágenes nuevas al servidor | Sitio `/admin` del servidor: carga o carpeta `originals/`, preparación en segundo plano con progreso. La de 93 GB, en unos 21 min |
+| R5 | No servir la imagen completa; el servidor decide qué enviar | Solo las unidades de la vista actual, en el nivel que necesita: una vista a 1:1 de la imagen de 17 GB recibe 0.55 MB |
+| R6 | El cliente gestiona lo cargado para no sobrecargar el navegador | Curva del olvido (8.2): 32 MB más 48 MB comprimidos; los descartes se informan al servidor |
+| R7 | HTTP para los archivos iniciales; protocolo propio para la imagen, documentado | El servidor sirve por HTTP las páginas, su JavaScript y las miniaturas; la imagen va solo por el Protocolo SP |
+| R8 | Control y recuperación inspirados en Selective Repeat, SACK, ventana deslizante, control de flujo, control de congestión y slow start | Secuencia, `ACK`, ventana deslizante, control de flujo, *slow start*, RTO, código de borrado y *run-and-tumble* (7); menos descartes por cola llena en todos los enlaces (10.1) |
+| R9 | No dejar al usuario desatendido; los números de la imagen de prueba deben leerse con claridad | *Splats* primero, épocas, reintentos de control y reconexión automática (6); los dígitos se leen a 16× |
+| R10 | Funcionar con imágenes de 17 a 93 GB | Corte en *streaming* con memoria constante; las imágenes de 17, 24, 28, 55 y 93 GB están preparadas y se sirven (10.2) |
 
 Los algoritmos más conocidos (Reno, Vegas, Selective Repeat) ya fueron tomados por otros estudiantes, por lo que los mecanismos principales de este protocolo son propios o poco comunes; donde se adapta un mecanismo de TCP, se indica qué se tomó y qué se cambió.
 
@@ -45,8 +45,6 @@ Tres procesos colaboran: el servidor, un *client half* en la máquina del usuari
 
 ![Arquitectura: 4 componentes en 2 máquinas](protocolo-sp-arquitectura.png)
 
-Los datos de la imagen solo cruzan la red por el enlace UDP; el WebSocket es local y el HTTP solo entrega archivos iniciales.
-
 | Componente | Dónde corre | Transporte | Qué hace |
 | --- | --- | --- | --- |
 | Servidor (`server/`) | máquina servidor | UDP 9000 (SP) y HTTP 8000 | Sesiones, plan de envío, ritmo, ventana, caché de paquetes, Physarum. Sirve todas las páginas: la lista (`/`), el visor (`/view`), sus scripts, las miniaturas y el sitio de carga y preparación (`/admin`) |
@@ -54,7 +52,7 @@ Los datos de la imagen solo cruzan la red por el enlace UDP; el WebSocket es loc
 | *Client half* (`client/`) | máquina del usuario | UDP (SP) y WebSocket 8090 | Una sesión SP por página, cada una con su propio socket UDP; decodificación del código de borrado, `ACK` y `REPORT`, ventana de recepción, latido. No sirve páginas |
 | Visor (`viewer/`) | navegador | HTTP al servidor, WebSocket local | Dibuja *splats* y *tiles* con WebGL2, caché con curva del olvido, informa lo procesado y se reconecta solo si pierde la conexión |
 
-Todo el tráfico HTTP va al servidor y se limita a los archivos iniciales: las páginas, su JavaScript y las miniaturas. La imagen viaja solo por el Protocolo SP. Cada página abre su propia sesión, por lo que el servidor ve a cada usuario por separado, aunque varios compartan un *client half*. El *client half* solo acepta páginas que vienen del servidor o de la propia máquina, para que otro sitio web no pueda controlar una sesión. Entre el visor y el *client half* hay un canal local (sección 5.5) que no forma parte del protocolo de red.
+Cada página abre su propia sesión, por lo que el servidor ve a cada usuario por separado aunque varios compartan un *client half*. El *client half* solo acepta páginas que vienen del servidor o de la propia máquina, para que otro sitio web no pueda controlar una sesión.
 
 ## 4. Representación de la imagen
 
@@ -82,15 +80,7 @@ Los *blobs* de una unidad se ordenan por importancia (amplitud por área) y se c
 
 ### 4.3 Detalle real: hasta dónde acercar
 
-El número de píxeles no es la resolución real: un escaneo puede ser más suave que sus píxeles y un texto de 1 px usa cada uno. Al preparar, se reducen 64 *tiles* del nivel 0 a 1/2, 1/4 y 1/8, se vuelven a ampliar y se mide dónde la mediana cae por debajo de 30 dB. El resultado es el **detail scale**, píxeles de imagen por unidad de detalle real, que el servidor envía en `CHART`. El visor deja de acercar cuando una unidad de detalle cubre 16 píxeles de pantalla.
-
-| Imagen | 2× / 4× / 8× (dB) | detail scale | Límite de zoom |
-| --- | --- | --- | --- |
-| bigbig.png, dígitos de 1 px | 9.5 / 7.8 / 7.7 | 1.00 | 16× |
-| Holbein, escaneo de pintura | 32.0 / 29.7 / 28.3 | 3.62 | 4.4× |
-| bills.jpg, foto ampliada | 42.8 / 34.9 / 27.2 | 6.22 | 2.6× |
-
-Como referencia de costo: la pintura de Holbein (26,292 × 30,000 px, JPEG de 244 MB) se corta en 81 s con 0.9 GB de memoria como máximo, en 8 niveles y 16,274 *tiles* (231 MB), y sus *splats* ocupan 6 MB.
+El número de píxeles no es la resolución real: un escaneo puede ser más suave que sus píxeles y un texto de 1 px usa cada uno. Al preparar, se mide en 64 *tiles* del nivel 0 cuánto se pierde al reducirlos y ampliarlos de nuevo (umbral de 30 dB). El resultado es el **detail scale**, píxeles de imagen por unidad de detalle real, que el servidor envía en `CHART`. El visor deja de acercar cuando una unidad de detalle cubre 16 píxeles de pantalla: 16× en las imágenes de dígitos (trazos de 1 px) y unas 4× en un escaneo más suave que sus píxeles.
 
 ## 5. Formato de los mensajes
 
@@ -244,12 +234,7 @@ Cada datagrama UDP lleva exactamente un mensaje: una cabecera fija de **20 bytes
 
 ### 5.5 Canal local entre el visor y el client half
 
-No viaja por la red: son WebSockets entre la página y el *client half* en `127.0.0.1:8090`, por dos rutas.
-
-- **`/ws`**: la sesión de un visor, una por página. El visor envía JSON `{type:"open", image}`, `{type:"view", cx, cy, scale, w, h, dropped, held}` y, cada 50 ms, `{type:"consumed", bytes}` con los bytes ya procesados (base del control de flujo, sección 7.4). El *client half* reenvía `chart`, `stats`, `fault` y `link` como JSON, y los datos como frames binarios: `[1] + payload de CONFETTI` en cuanto llega cada paquete, y `[2] + level u8 + x u32 + y u32 + format u8 + archivo` cuando un *tile* está completo.
-- **`/catalog`**: la lista de imágenes. Responde una vez `{type:"catalog", images, site}`, que el *client half* obtiene del servidor con `LIST` y `CATALOG`, y se cierra.
-
-Cada 15 s el *client half* envía un *ping* de WebSocket a cada página. Una página que no respondió al anterior (su dispositivo se durmió o desapareció sin cerrar) se cierra, junto con su sesión en el servidor.
+No viaja por la red: es un WebSocket entre la página y el *client half* en `127.0.0.1:8090`. El visor envía JSON: `open`, `view` y, cada 50 ms, `consumed` con los bytes ya procesados (base del control de flujo, sección 7.4). El *client half* reenvía `chart`, `stats`, `fault` y `link` como JSON, y los datos como frames binarios: cada paquete de `CONFETTI` en cuanto llega y cada *tile* cuando está completo. Una segunda ruta, `/catalog`, entrega la lista de imágenes.
 
 ## 6. Intercambio
 
@@ -284,12 +269,12 @@ Para cada `VIEW` el servidor calcula las unidades que cubren la vista (el nivel 
 
 ### 6.4 Robustez del intercambio
 
-- Los mensajes de control (`HELLO`, `OPEN`, el último `VIEW`) viajan por la misma ruta con pérdidas que los datos; por eso se repiten cada 300 ms hasta ver su respuesta.
-- Un `HELLO` reinicia época y secuencia, así una página nueva nunca hereda el estado de la anterior.
-- **Reconexión automática.** Si el visor pierde la conexión (un teléfono o tableta que se bloquea cierra los sockets de la página), reintenta a los 0.5, 1, 2, 4 y luego cada 8 s, y de inmediato cuando la página vuelve a estar visible o regresa la red. Conserva lo que ya tenía en memoria y la posición de la cámara; abre una sesión nueva y vuelve a pedir la vista actual. Una sesión nueva no sabe nada de la página, así que el primer VIEW lleva las unidades de esa vista que el visor ya tiene completas (en memoria o en su segundo nivel), elegidas con la misma regla con que el servidor decide qué necesita una vista. El servidor las da por enviadas y recibidas y solo envía lo que falta; si la lista no cabe en un datagrama, el client half la reparte en varios VIEW seguidos. Antes la página recibía otra vez toda la vista (1.8 MB en la imagen de 24 GB, 3.6 MB en la de 93 GB); ahora, nada. El servidor solo acepta esa lista de un VIEW actual: uno atrasado podría nombrar una unidad que la página descartó después, y esa unidad no volvería a llegar.
-- **Páginas silenciosas.** El *client half* envía un *ping* a cada página cada 15 s y cierra la que no respondió al anterior, con su sesión. Así no quedan sesiones abiertas para páginas que ya no están. Cualquier mensaje de la página cuenta también como respuesta: en un enlace lento el ping espera detrás de todo lo que ya va en camino hacia la página, y una página ocupada dibujando esos datos se cerraba como si estuviera dormida y los perdía.
-- Si los dos lados hablan versiones distintas, el servidor lo registra y el visor muestra el motivo, en lugar de quedar en negro.
-- **Límite por cliente**: el servidor procesa como máximo 60 mensajes por segundo de cada cliente (ráfagas de 120) y, aparte, 250 `ACK` por segundo (ráfagas de 500). Lo que excede se descarta sin procesar: un cliente que se comporta como inundación no consume CPU ni ancho de banda del servidor.
+- **Reintentos.** `HELLO`, `OPEN` y el último `VIEW` se repiten cada 300 ms hasta ver su respuesta: viajan por la misma ruta con pérdidas que los datos.
+- **Reinicio.** Un `HELLO` reinicia época y secuencia: una página nueva nunca hereda el estado de la anterior.
+- **Reconexión automática.** Si el visor pierde la conexión (un teléfono que se bloquea cierra sus sockets), reintenta a los 0.5, 1, 2, 4 y luego cada 8 s, y de inmediato al volver a estar visible. Conserva su memoria y la cámara, y abre una sesión nueva. El primer `VIEW` lleva las unidades de esa vista que ya tiene completas; el servidor las da por enviadas y solo envía lo que falta. Solo acepta esa lista de un `VIEW` actual: uno atrasado podría nombrar una unidad descartada después.
+- **Latido.** El *client half* envía un *ping* a cada página cada 15 s y cierra, con su sesión, la que no dio señal desde el anterior. Cualquier mensaje de la página cuenta como señal: en un enlace lento el *ping* espera detrás de los datos en cola.
+- **Versiones.** Si los dos lados hablan versiones distintas, el servidor lo registra y el visor muestra el motivo.
+- **Límite por cliente.** 60 mensajes por segundo (ráfagas de 120) y, aparte, 250 `ACK` por segundo (ráfagas de 500); el exceso se descarta sin procesar.
 
 ### 6.5 Estados de la sesión
 
@@ -365,7 +350,7 @@ El límite real del receptor no es el *socket* sino el navegador: decodificar *t
 
 `buffer = min(2 MiB, max(128 KB, ritmo de vaciado del visor × 1 s))`
 
-El visor cuenta un paquete de *splats* como procesado al dibujarlo y un *tile* al terminar de decodificarlo, y lo informa cada 50 ms (`consumed`). La diferencia incluye lo que espera en el WebSocket y lo que espera ser decodificado. Si `rwnd` llega a 0 el servidor se detiene; cuando el visor se pone al día, el *client half* envía un `ACK` de actualización de ventana (cambio de al menos 16 paquetes o 25 %) y los datos siguen. Medido: una página que dejó de procesar detuvo al servidor en exactamente 2.00 MB, y al ponerse al día los datos siguieron de inmediato. El buffer se ajusta a cada página: el ritmo de vaciado son los bytes que el visor procesó en el último segundo, el mejor de los últimos 10 s, y se vuelve a medir cuando los datos reanudan tras una pausa. Fijo en 2 MiB, en un enlace de 400 kbit/s (el 3G de Chrome) eran 40 s de datos en cola delante del visor, y cada vista nueva esperaba detrás de lo que iba para las anteriores. Medido con ese enlace: la vista a la que se llegó con el zoom empezó a dibujarse a los 3.5 s en vez de 41 s y terminó a los 28 s en vez de 65 s, con 1.3 MB recibidos en vez de 3.1 MB. En una página local el buffer llega a 2 MiB en pocos informes y nada cambió (0.2 s por vista).
+El visor cuenta un paquete de *splats* como procesado al dibujarlo y un *tile* al terminar de decodificarlo, y lo informa cada 50 ms (`consumed`). La diferencia incluye lo que espera en el WebSocket y lo que espera ser decodificado. Si `rwnd` llega a 0 el servidor se detiene; cuando el visor se pone al día, el *client half* envía un `ACK` de actualización de ventana (cambio de al menos 16 paquetes o 25 %) y los datos siguen. Una página que dejó de procesar detuvo al servidor en 2.00 MB, y al ponerse al día los datos siguieron de inmediato. El buffer se ajusta a cada página: el ritmo de vaciado son los bytes que el visor procesó en el último segundo, el mejor de los últimos 10 s. Con un buffer fijo de 2 MiB, un enlace de 400 kbit/s tenía 40 s de datos en cola delante del visor y cada vista nueva esperaba detrás de las anteriores (sección 10.3).
 
 ### 7.5 Slow start
 
@@ -424,7 +409,7 @@ Con 3 usuarios y una caché de 2 MB, Physarum redujo las lecturas de disco frent
 | Los 3 van al mismo punto | **363** | 507 | 497 |
 | Cada uno a un punto distinto | **8,223** | 14,766 | 16,781 |
 
-El reparto de la subida no mostró cambio medible: incluso un usuario que recorre la imagen a 3 pantallas por segundo desperdicia solo cerca del 2 %, porque cada `VIEW` nuevo cancela lo pendiente de la vista anterior (sección 6.2).
+El reparto de la subida no mostró cambio medible: cada `VIEW` nuevo ya cancela lo pendiente de la vista anterior (sección 6.2).
 
 ### 8.2 Curva del olvido en el navegador (Ebbinghaus)
 
@@ -448,86 +433,51 @@ MB descargados de nuevo con 32 MB de presupuesto, en sesiones simuladas:
 
 La curva del olvido iguala al modelo anterior (el montoncito de arena abeliano de Dhar) y ambos superan a LRU. Lo decisivo es medir por byte: con la retención sola se comporta como LRU.
 
-### 8.3 Memoria del lienzo
-
-El lienzo se dibuja con un presupuesto de píxeles: la densidad de la pantalla, como máximo 2× y como máximo lo que lo mantiene por debajo de 2 megapíxeles. Antes, en una pantalla Retina, los dos destinos de render ocupaban 93 MB de GPU y un solo cuadro de *tiles* podía superar todo el presupuesto.
-
 ## 9. Políticas y decisiones de diseño
 
-Las políticas fijan qué hace el sistema en cada situación; las decisiones de diseño explican por qué se eligió cada mecanismo frente a sus alternativas.
+Cada política se explica en su sección; aquí se resume su regla y el lugar del código donde vive.
 
 ### 9.1 Políticas
 
 | Política | Regla | Dónde |
 | --- | --- | --- |
-| Orden de envío | Reparación de la base, primer *chunk* de cada unidad de *splats* (de grueso a fino), *tiles*, reparación de *tiles*, *chunks* restantes, reparación del resto (6.3) | `server/session.ts`: `plan`, `nextWork` |
-| Cancelación por época | Un `VIEW` más nuevo rehace el plan y descarta lo pendiente; uno más viejo se ignora (6.2) | `server/session.ts`: `onMessage` |
-| Reparación | k − got + 1 símbolos, tras srtt + 250 ms sin envíos de esa unidad, hasta 6 veces, solo si sigue en pantalla; la base siempre (7.2) | `server/session.ts`: `repairDue`, `repair` |
-| Ritmo y ventana | Tasa de *slow start* y luego *run-and-tumble*; en vuelo ≤ min(cwnd, rwnd) (7.3 a 7.7) | `server/tumble.ts`; `server/session.ts`: `windowOpen` |
-| Caché del servidor | Sale la menor conductancia por byte (Physarum), hasta el 90 % de 128 MB (8.1) | `server/session.ts`: `PacketCache.evict` |
-| Reparto de la subida | Proporcional a la conductancia del tubo de cada usuario, mínimo 0.1, cuando el tope global limita (8.1) | `server/main.ts`: bucle de ritmo; `server/physarum.ts`: `adapt` |
-| Caché del navegador | Sale la menor retención por byte; 32 MB más 48 MB comprimidos; nunca la base ni lo visible (8.2) | `viewer/src/forgetting.ts`: `evict` |
-| Liberación de memoria | Nada crece sin límite: retención que decae (navegador), conductancia con vida media de 10 s (servidor), *tile* incompleto descartado a los 30 s (*client half*), sesión sin mensajes cerrada a los 30 s | `forgetting.ts`, `physarum.ts`, `client/link.ts`, `server/main.ts` |
-| Reintentos de control | `HELLO`, `OPEN` y el último `VIEW`, cada 300 ms hasta su respuesta (6.4) | `client/link.ts`: `retry` |
-| Admisión | 60 mensajes/s (ráfagas de 120) y 250 `ACK`/s (ráfagas de 500) por cliente; el exceso se descarta | `server/main.ts`: `admit` |
-| Fin de sesión | `BYE`, 30 s sin mensajes, o un latido sin respuesta (6.5) | `server/main.ts`; `client/main.ts`: latido |
-| Reconexión | Reintento de 0.5 s a 8 s, inmediato al volver a ser visible; conserva caché y cámara, y declara lo que conserva para no recibirlo dos veces (6.4) | `viewer/src/viewer.ts`: `connect`, `reconnectNow`, heldForView |
-| Nivel y zoom | Nivel floor(log2(scale) + 0.25); acercar hasta que una unidad de detalle real cubra 16 píxeles de pantalla (4.3) | `server/image.ts`: `levelFor`; `viewer.ts`: `magnifyLimit` |
-| Orígenes | El *client half* acepta páginas del servidor y de la propia máquina; otras solo con `--origins` | `client/main.ts`: `originAllowed` |
+| Orden de envío | Base, primer *chunk* de los *splats*, *tiles*, reparaciones, resto (6.3) | `server/session.ts`: `plan`, `nextWork` |
+| Cancelación por época | Un `VIEW` nuevo descarta lo pendiente (6.2) | `server/session.ts`: `onMessage` |
+| Código de borrado | Bloques de k ≤ 64 en GF(256) (7.2) | `shared/fec.ts`: `repairSymbol` |
+| Reparación | k − got + 1 símbolos tras srtt + 250 ms, hasta 6 veces (7.2) | `server/session.ts`: `repairDue`, `repair` |
+| Ventana deslizante | En vuelo ≤ min(cwnd, rwnd); RTO con *backoff* (7.3) | `server/session.ts`: `windowOpen`, `onAck` |
+| Control de flujo | Buffer de 1 s del ritmo del visor, de 128 KB a 2 MiB (7.4) | `client/main.ts`: `DrainRate`; `client/link.ts`: `ack` |
+| *Slow start* y tasa | Salida HyStart++ y luego *run-and-tumble* (7.5, 7.6) | `server/tumble.ts`: `RunAndTumble` |
+| Ritmo | *Token bucket* por sesión y global (7.7) | `server/main.ts`: bucle de ritmo |
+| Caché del servidor | Sale la menor conductancia por byte (8.1) | `server/session.ts`: `PacketCache.evict` |
+| Reparto de la subida | Proporcional a la conductancia de cada usuario (8.1) | `server/physarum.ts`: `adapt` |
+| Caché del navegador | Sale la menor retención por byte; 32 MB más 48 MB (8.2) | `viewer/src/forgetting.ts`: `evict` |
+| Liberación de memoria | Todo decae o vence: retención, conductancia (10 s), *tile* incompleto (30 s), sesión sin mensajes (30 s) | `forgetting.ts`, `physarum.ts`, `client/link.ts`, `server/main.ts` |
+| Reintentos de control | Cada 300 ms hasta la respuesta (6.4) | `client/link.ts`: `retry` |
+| Admisión | 60 mensajes/s y 250 `ACK`/s por cliente (6.4) | `server/main.ts`: `admit` |
+| Fin de sesión | `BYE`, 30 s sin mensajes o latido sin señal (6.5) | `server/main.ts`; `client/main.ts`: latido |
+| Reconexión | De 0.5 s a 8 s; declara lo que conserva (6.4) | `viewer/src/viewer.ts`: `connect`, `heldForView` |
+| Nivel y zoom | floor(log2(scale) + 0.25); hasta 16 px por unidad de detalle (4.3) | `server/image.ts`: `levelFor`; `viewer.ts`: `magnifyLimit` |
+| Orígenes | Solo páginas del servidor o de la propia máquina (3) | `client/main.ts`: `originAllowed` |
 
 ### 9.2 Decisiones de diseño
+
+El porqué de cada mecanismo está en su subsección (7.1 a 8.2). Estas son las decisiones de arquitectura:
 
 | Decisión | Alternativas consideradas | Por qué |
 | --- | --- | --- |
 | UDP con control propio | TCP o WebSocket directo al servidor | TCP entrega en orden: una pérdida detiene todo lo que viene detrás. Con UDP cada unidad se controla por separado: orden, reparación y ritmo |
-| Recuperación con código de borrado | Selective Repeat, Go-Back-N, SACK | El receptor no necesita decir qué perdió; un mismo símbolo repara cualquier pérdida del bloque; el tráfico de reparación fue unas 10 veces menor |
-| Entrega Confetti para *splats* | Paquetes por región de la unidad | Una pérdida se ve como suavidad y no como un hueco, y nada espera una retransmisión |
 | *Tiles* en todos los niveles y *splats* primero | Solo *splats* en los niveles gruesos | Los *splats* perdían textura de bajo contraste al alejar; los *tiles* dan la imagen exacta en reposo y los *splats* lo primero visible |
-| Ventana sobre bytes en vuelo | Ventana sobre un flujo de bytes, como TCP | Las unidades son independientes: una pérdida no bloquea a las demás |
-| cwnd a partir del RTT mínimo | RTT suavizado | Con el suavizado, la cola agrandaba la ventana y la ventana agrandaba la cola |
-| *Slow start* con CSS y salida combinada | Salir con la primera pérdida o el primer aumento de retardo | El *jitter* y la pérdida aleatoria terminaban el arranque demasiado pronto en el enlace móvil |
-| Ventana de recepción medida en el navegador | El buffer del socket | El límite real del receptor es decodificar y subir a la GPU |
-| *Run-and-tumble* | AIMD (Reno), Vegas | Esos algoritmos ya estaban tomados; la dirección al azar evita que varios usuarios oscilen juntos; reacciona al retardo y no a la pérdida aleatoria |
-| Physarum | Círculos de Apolonio, LRU | Apolonio no mostró ganancia medida; Physarum redujo las lecturas de disco entre 27 y 51 % |
-| Curva del olvido | Montoncito de arena de Dhar, LRU | Iguala al montoncito de arena y ambos superan a LRU |
-| Límite de zoom por detalle medido | Un límite fijo para todas las imágenes | Un texto de 1 px necesita más aumento que un escaneo más suave que sus píxeles |
 | El servidor sirve todas las páginas | Que el *client half* las sirva | El enunciado pide HTTP desde el servidor para los archivos iniciales |
 | Una sesión por página | Una sesión por *client half* | Con una sola, varias páginas o dispositivos se cortaban entre sí |
 
-## 10. Cómo se cumple cada requisito
-
-Nueve de los diez requisitos tienen mecanismo y evidencia medida; el décimo (las imágenes de evaluación) está cubierto en cuatro de las cinco imágenes.
-
-| # | Mecanismo | Evidencia |
-| --- | --- | --- |
-| R1 Varios clientes | Una sesión por página, caché de paquetes compartida, Physarum, tope global | 3 usuarios moviéndose a la vez durante 15 s sobre la imagen de 93 GB: los tres con los dígitos nítidos a resolución completa 2 s después de detenerse |
-| R2 Protocolo propio por cliente | `VIEW` con época; plan de envío por vista; 15 mensajes (sección 5) | El servidor decide unidades, orden y ritmo de cada cliente |
-| R3 Interfaz sin solicitudes externas | HTML, CSS y JavaScript propios; WebGL2 sin bibliotecas externas | Ninguna URL externa en las páginas; funciona sin internet |
-| R4 Agregar imágenes | Sitio del servidor (`/admin`): carga en *streaming* o carpeta `originals/`, preparación en segundo plano con progreso | Las cuatro imágenes de evaluación se agregaron así; la de 93 GB en unos 21 min |
-| R5 No servir la imagen completa | Solo las unidades de la vista actual, en el nivel que la vista necesita | Una vista a 1:1 de la imagen de 17 GB recibe 0.55 MB; cada usuario recibió unos 3.7 MB moviendo la de 93 GB |
-| R6 El cliente gestiona lo cargado | Curva del olvido, 32 MB más 48 MB comprimidos; descartes informados al servidor | Memoria de imagen siempre ≤ 32 MB |
-| R7 HTTP inicial y protocolo propio documentado | El servidor sirve por HTTP todas las páginas, su JavaScript y las miniaturas; la imagen va por el Protocolo SP | En Chrome, todas las peticiones HTTP fueron al servidor; las únicas otras conexiones son los WebSockets locales al *client half* |
-| R8 Control y recuperación tipo TCP | Secuencia, `ACK`, ventana deslizante, rwnd, *slow start*, RTO con *backoff*, código de borrado, *run-and-tumble* | Sección 11: menos descartes por cola llena en todos los enlaces |
-| R9 No dejar al usuario desatendido; números legibles | *Splats* primero, épocas, reintentos de control, reconexión automática, zoom hasta 16× en imágenes de texto | Los dígitos se leen a 16×; una página que perdió la conexión se recuperó sola y siguió cargando niveles finos |
-| R10 Imágenes de 17 a 93 GB | Corte en *streaming* con memoria constante; ajuste de *splats* acotado a unos 300 *units* sin importar el tamaño | 17, 28, 55 y 93 GB preparadas y servidas; pendiente la de 24 GB |
-
-## 11. Resultados medidos
+## 10. Resultados medidos
 
 Con la ventana deslizante y el *slow start*, el protocolo es igual o más rápido que el envío solo por tasa en todos los enlaces menos uno, y desperdicia mucho menos donde hay pérdidas. Las mediciones son sobre la imagen de 17 GB.
 
-### 11.1 Método
+**Método.** En *loopback* nunca se pierde un paquete, así que un emulador en el camino de envío del servidor y en el de regreso del *client half* aplica pérdida, retardo, *jitter*, límite de tasa y cola. Tres perfiles: LAN (100 Mbit/s, 1 ms), doméstico (20 Mbit/s, 30 ms, 0.5 % de pérdida) y móvil (2 Mbit/s, 120 ms, 1 % de pérdida más ráfagas). Un cliente sin interfaz recorre dos sesiones con pantalla de 1,920 × 1,080: **salto** (la imagen entera y luego directo a 1:1) e **inmersión** (zoom continuo hasta 1:1). Medianas de 5 corridas (móvil: 9), con tope del servidor de 50 Mbit/s.
 
-En *loopback* nunca se pierde un paquete, así que ningún mecanismo se vería actuar. Un emulador en el camino de envío del servidor y en el de regreso del *client half* aplica pérdida, retardo, *jitter*, límite de tasa y cola:
-
-| Perfil | Tasa | Retardo de ida | Jitter | Pérdida | Cola del cuello de botella |
-| --- | --- | --- | --- | --- | --- |
-| LAN | 100 Mbit/s | 1 ms | — | — | 100 ms |
-| Doméstico | 20 Mbit/s | 30 ms | ±3 ms | 0.5 % uniforme | 100 ms |
-| Móvil | 2 Mbit/s | 120 ms | ±20 ms | 1 % uniforme y ráfagas (Gilbert-Elliott: entrar 1 %, salir 30 %) | 300 ms |
-
-Un cliente sin interfaz (el mismo código que usa el *client half*) recorre dos sesiones guionizadas con pantalla de 1,920 × 1,080: **salto** (la imagen entera y luego directo a 1:1) y **inmersión** (zoom continuo de 10 % cada 50 ms hasta 1:1). Se mide el tiempo hasta que la vista final está nítida, los bytes enviados y los paquetes descartados por cola llena. Tope del servidor: 50 Mbit/s. Medianas de 5 corridas (enlace móvil: 9).
-
-### 11.2 Ventana y slow start frente a envío solo por tasa
+### 10.1 Ventana y slow start frente a envío solo por tasa
 
 Cada celda: tiempo hasta nítido, MB enviados, paquetes descartados por cola llena. "Solo tasa" es el mismo servidor sin ventana y con el arranque fijo anterior de 4 Mbit/s.
 
@@ -542,16 +492,7 @@ Cada celda: tiempo hasta nítido, MB enviados, paquetes descartados por cola lle
 
 En LAN el *slow start* alcanza el tope en milisegundos (0.08 s frente a 0.29 s). En el enlace doméstico, que descarta en lugar de encolar, la ventana evitó los 649 descartes. En el móvil la inmersión envía 44 % menos datos; el salto es 0.12 s más lento, el único caso peor.
 
-### 11.3 Pruebas dirigidas
-
-| Prueba | Sin el mecanismo | Con el mecanismo |
-| --- | --- | --- |
-| Cliente que deja de confirmar | 707 KB en 3 s, hasta el fin de sesión a los 30 s | 12 KB y unos pocos sondeos en 10 s |
-| Navegador que deja de procesar | El servidor sigue enviando | Se detiene en 2.00 MB y reanuda al ponerse al día |
-| Pérdida de 1 % sobre *splats* | −3.1 dB y rayas visibles | −0.4 dB, solo más suave |
-| Tráfico de reparación | Reenviar unidades enteras | Unas 10 veces menos bytes |
-
-### 11.4 Imágenes de evaluación
+### 10.2 Imágenes de evaluación
 
 Las cuatro imágenes de dígitos se agregaron por el sitio del servidor y se prepararon sin cambios en el código. El preparado ocupa cerca del 12 % del archivo original.
 
@@ -562,23 +503,18 @@ Las cuatro imágenes de dígitos se agregaron por el sitio del servidor y se pre
 | 55 GB | 55.8 GB | 136,325 × 136,325 | 11 | 379,631 | 6.4 GiB |
 | 93 GB | 93.5 GB | 176,393 × 176,393 | 11 | 635,559 | 10.1 GiB |
 
-La preparación tomó 12 min para la de 55 GB y unos 21 min de trabajo para la de 93 GB. En las cuatro, el detalle real medido es de 1 píxel (dígitos dibujados con trazos de 1 px), así que el visor permite acercar hasta 16×. Durante la preparación hay un pico de espacio en disco de unas 5.5 veces el tamaño final, porque se escriben a la vez los *tiles* JPEG y WebP antes de elegir el menor.
+La preparación tomó 12 min para la de 55 GB y unos 21 min para la de 93 GB. En las cuatro, el detalle real medido es de 1 píxel (dígitos con trazos de 1 px), así que el visor permite acercar hasta 16×. La de 24 GB (una fotografía de 108,199 × 81,503 px) también está preparada y se sirve.
 
-### 11.5 Varios usuarios y conexiones perdidas
+### 10.3 Varios usuarios y conexiones
 
 | Prueba | Resultado |
 | --- | --- |
-| 3 páginas en Chrome moviéndose a la vez durante 15 s sobre la imagen de 93 GB, cada una en otra zona | Las tres conectadas y dibujando el nivel 0 (dígitos nítidos) 2 s después de detenerse; 3 sesiones en el servidor; unos 3.7 MB recibidos cada una |
-| *Client half* detenido y reiniciado bajo una página abierta | La página mostró "reconectando", volvió sola y, al acercar, recibió datos y dibujó el nivel 0 |
-| Página que no responde los *ping* (como una tableta dormida) | Cerrada a los 28 s, junto con su sesión en el servidor |
-| Página normal 35 s sin actividad | Siguió conectada: el navegador responde los *ping* por sí solo |
-| Borde derecho de la imagen de 93 GB vista entera | Una franja oscura de unos 4 px (el último píxel de cada nivel grueso dibujado completo) desapareció al recortar el dibujo al contorno real de la imagen |
+| 3 páginas en Chrome moviéndose a la vez durante 15 s sobre la imagen de 93 GB, cada una en otra zona | Las tres dibujando el nivel 0 (dígitos nítidos) 2 s después de detenerse; unos 3.7 MB recibidos cada una |
+| *Client half* detenido y reiniciado bajo una página abierta | La página volvió sola y no recibió de nuevo lo que ya tenía (antes, de 1.8 a 3.6 MB) |
+| Página que no da señal (como una tableta dormida) | Cerrada a los 28 s, junto con su sesión en el servidor |
+| Enlace de 400 kbit/s entre la página y el *client half*, acercando sobre la imagen de 17 GB | La vista empezó a dibujarse a los 3.5 s y terminó a los 28 s; con el buffer fijo de 2 MiB, a los 41 s y 65 s |
 
-### 11.6 Lo que no funcionó
-
-Se registran porque explican el diseño final: entregar la tasa promedio al salir del *slow start* (el enlace móvil quedó en 1.3 Mbit/s); salir solo por pérdida (las ráfagas aleatorias lo terminaban antes de tiempo); salir solo por entrega plana (los `ACK` agrupados lo engañaban); calcular la ventana con el RTT suavizado (crecía con la cola); y el reparto de subida de Physarum y el modelo de Apolonio, sin ganancia medible.
-
-## 12. Referencias
+## 11. Referencias
 
 **RFC**
 
