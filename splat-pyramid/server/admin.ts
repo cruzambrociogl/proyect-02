@@ -18,6 +18,7 @@
 
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, join } from "node:path";
 import { isReady } from "./image.ts";
@@ -48,6 +49,22 @@ export function startAdmin(o: AdminOptions): void {
   const jobs = new Map<string, Job>();
   const queue: string[] = [];
   let running = false;
+  // what each prepared folder weighs: a pyramid is hundreds of thousands of files, so it is
+  // counted once, in the background, and forgotten only when the folder changes
+  const sizes = new Map<string, number | symbol>();
+
+  function preparedBytes(name: string): number | undefined {
+    const known = sizes.get(name);
+    if (typeof known === "number") return known;
+    if (known === undefined) {
+      const counting = Symbol();
+      sizes.set(name, counting);
+      folderBytes(join(o.data, name)).then(
+        (bytes) => { if (sizes.get(name) === counting) sizes.set(name, bytes); },
+        () => { if (sizes.get(name) === counting) sizes.delete(name); });
+    }
+    return undefined;
+  }
 
   /** A plain file or folder name (no path, not hidden). Uploads also need an image extension. */
   const safe = (name: string | null): string | null =>
@@ -56,14 +73,16 @@ export function startAdmin(o: AdminOptions): void {
   function describe(name: string) {
     const original = join(o.originals, name), prepared = join(o.data, name);
     const out: Record<string, unknown> = { name, original: existsSync(original) ? statSync(original).size : null };
+    const job = jobs.get(name);
+    const busy = ["queued", "ingesting", "fitting"].includes(job?.state ?? "");
     if (existsSync(join(prepared, "pyramid.json"))) {
       const meta = JSON.parse(readFileSync(join(prepared, "pyramid.json"), "utf8"));
       Object.assign(out, { width: meta.width, height: meta.height, maxLevel: meta.max_level, split: meta.split,
-                           prepared: isReady(prepared) ? "ready" : "partial", preparedBytes: folderBytes(prepared) });
+                           prepared: isReady(prepared) ? "ready" : "partial",
+                           preparedBytes: busy ? undefined : preparedBytes(name) });
     } else {
       out.prepared = "no";
     }
-    const job = jobs.get(name);
     if (job) out.job = { ...job, log: job.log.slice(-12), seconds: ((job.finished || Date.now()) - job.started) / 1000 };
     return out;
   }
@@ -110,6 +129,7 @@ export function startAdmin(o: AdminOptions): void {
       job.state = ok ? "done" : "failed";
       job.progress = ok ? 1 : job.progress;
       job.finished = Date.now();
+      sizes.delete(name);
       running = false;
       o.onReady();
       next();
@@ -185,6 +205,7 @@ export function startAdmin(o: AdminOptions): void {
         if (["ingesting", "fitting", "queued"].includes(jobs.get(name)?.state ?? "")) return json(409, { error: "being prepared" });
         rmSync(join(url.pathname === "/api/prepared" ? o.data : o.originals, name), { recursive: true, force: true });
         jobs.delete(name);
+        sizes.delete(name);
         o.onReady();
         json(200, { ok: true });
       } else if (req.method === "GET" && url.pathname.startsWith("/thumb/")) {
@@ -205,10 +226,14 @@ export function startAdmin(o: AdminOptions): void {
                                           `http://localhost:${o.port}/admin (add and prepare; originals: ${o.originals})`));
 }
 
-function folderBytes(dir: string): number {
+/** Bytes under a folder, without holding up the server: stats go out a batch at a time. */
+async function folderBytes(dir: string): Promise<number> {
+  const files = (await readdir(dir, { withFileTypes: true, recursive: true }))
+    .filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name));
   let total = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
-    if (entry.isFile()) total += statSync(join(entry.parentPath, entry.name)).size;
+  for (let i = 0; i < files.length; i += 256) {
+    const sizes = await Promise.all(files.slice(i, i + 256).map((f) => stat(f).then((s) => s.size, () => 0)));
+    for (const s of sizes) total += s;
   }
   return total;
 }

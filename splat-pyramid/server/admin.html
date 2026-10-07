@@ -138,8 +138,8 @@ async function refresh() {
     render(JSON.parse(text));
   } catch { /* the server is restarting */ }
 }
-refresh();
-setInterval(refresh, 1000);
+// the next ask waits for the answer to the last one, so a slow server never piles up requests
+(async function poll() { await refresh(); setTimeout(poll, 1000); })();
 </script>
 </body>
 </html>
