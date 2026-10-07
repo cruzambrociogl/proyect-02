@@ -50,19 +50,70 @@ const upstream = parseImpairment(args.impair);
 // the catalog needs no session: one link answers every list page
 const link = new ClientLink(args.server, upstream);
 
+// The receive buffer is sized by how fast the page drains it: about DRAIN_TARGET_MS of it,
+// never under MIN_BUFFER nor over RECV_BUFFER. A fixed 2 MiB was 40 s of data in front of a
+// page on a 400 kbit/s link (Chrome's 3G): every new view waited behind what was queued for
+// the views before it. The drain rate is the page's handled bytes over the last RATE_SPAN_MS,
+// the best of the last RATE_MEMORY_MS. Idle time measures nothing about the page's speed: when
+// data starts again after IDLE_MS with nothing pending, the measure starts again from there,
+// and the rate measured before stands until a new one replaces it.
+// On a fast page the buffer grows to the full 2 MiB within a few reports: the rate it measures
+// is the buffer per report round, so 1 s of it is always more than the buffer.
+const DRAIN_TARGET_MS = 1000;
+const MIN_BUFFER = 128 * 1024;
+const RATE_SPAN_MS = 1000;
+const RATE_MEMORY_MS = 10_000;
+const IDLE_MS = 200;
+
+/** How fast a page handles what it is sent, from its `consumed` reports. */
+class DrainRate {
+  private points: { at: number; bytes: number }[] = [];
+  private best: { at: number; rate: number }[] = [];
+  private lastSend = 0;
+  /** Bytes per second; 0 until measured. */
+  rate = 0;
+
+  /** Data is about to go to the page, which has `backlog` bytes not yet handled of `consumed`. */
+  sending(backlog: number, consumed: number, now = performance.now()): void {
+    if (backlog === 0 && now - this.lastSend > IDLE_MS) this.points = [{ at: now, bytes: consumed }];
+    this.lastSend = now;
+  }
+
+  sample(bytes: number, now = performance.now()): void {
+    const p = this.points;
+    p.push({ at: now, bytes });
+    while (p.length > 2 && p[1].at <= now - RATE_SPAN_MS) p.shift();   // one point at or before the span
+    const span = now - p[0].at;
+    if (span < 100) return;
+    this.best.push({ at: now, rate: ((bytes - p[0].bytes) / span) * 1000 });
+    while (this.best.length > 1 && this.best[0].at < now - RATE_MEMORY_MS) this.best.shift();
+    this.rate = Math.max(...this.best.map((b) => b.rate));
+  }
+
+  /** The receive buffer for this page. */
+  get buffer(): number {
+    return Math.min(RECV_BUFFER, Math.max(MIN_BUFFER, (this.rate * DRAIN_TARGET_MS) / 1000));
+  }
+}
+
 /**
  * One viewer page: its own session with the server over its own UDP socket, the data handed
  * to that page as it lands. Flow control: the receive window the server is told is the
- * receive buffer minus what the page has not handled yet, counting both what waits in the
- * WebSocket and what the page holds but has not decoded, so a busy browser slows the server.
+ * page's receive buffer (sized by its drain rate, above) minus what the page has not handled
+ * yet, counting both what waits in the WebSocket and what the page holds but has not decoded,
+ * so a busy or slow browser slows the server.
  */
 async function session(ws: WebSocket): Promise<void> {
   const own = new ClientLink(args.server, upstream);
   let forwarded = 0, consumed = 0, open = true;
-  own.receiveWindow = () => (open ? Math.max(0, RECV_BUFFER - (forwarded - consumed)) : 0);
+  const drain = new DrainRate();
+  own.receiveWindow = () => (open ? Math.max(0, drain.buffer - (forwarded - consumed)) : 0);
   const toBrowser = (data: string | Buffer): void => {
     if (ws.readyState !== ws.OPEN) return;
-    if (typeof data !== "string") forwarded += data.length;
+    if (typeof data !== "string") {
+      drain.sending(forwarded - consumed, consumed);
+      forwarded += data.length;
+    }
     ws.send(data);
   };
   own.events = {
@@ -98,7 +149,10 @@ async function session(ws: WebSocket): Promise<void> {
   const handle = (data: Buffer): void => {
     const msg = JSON.parse(data.toString());
     if (msg.type === "open") own.open(String(msg.image));
-    else if (msg.type === "consumed") consumed = Math.min(forwarded, Number(msg.bytes) || 0);
+    else if (msg.type === "consumed") {
+      consumed = Math.min(forwarded, Number(msg.bytes) || 0);
+      drain.sample(consumed);
+    }
     else if (msg.type === "view") {
       own.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped, msg.held);
     }

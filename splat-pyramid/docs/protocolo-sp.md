@@ -310,7 +310,7 @@ El Protocolo SP adapta los mecanismos de control de TCP a datos que, a diferenci
 | Recuperación | Retransmisión de lo perdido (Go-Back-N o Selective Repeat) | Código de borrado *rateless*: símbolos nuevos, nunca un paquete repetido (7.2) |
 | Tolerancia a pérdida | Ninguna: el flujo espera la retransmisión | Entrega Confetti: lo perdido se ve más suave, nada espera (7.1) |
 | Ventana deslizante | Bytes sin confirmar ≤ min(cwnd, rwnd) | Bytes en vuelo ≤ min(cwnd, rwnd), sin bloqueo de cabeza de línea (7.3) |
-| Control de flujo | rwnd = espacio del buffer del receptor | rwnd = 2 MiB menos lo que el navegador aún no procesó (7.4) |
+| Control de flujo | rwnd = espacio del buffer del receptor | rwnd = un buffer de 128 KB a 2 MiB (1 s de lo que el navegador procesa) menos lo que aún no procesó (7.4) |
 | Inicio | Slow start, IW de 10 segmentos (RFC 5681, 6928) | Slow start con salida HyStart++ y Conservative Slow Start (7.5) |
 | Congestión | AIMD por pérdida (Reno), retardo (Vegas) | *Run-and-tumble* por retardo de cola (7.6) |
 | Temporizador | RTO con *backoff* exponencial (RFC 6298) | Igual, y una ventana de un paquete hasta el siguiente `ACK` (7.3) |
@@ -361,9 +361,11 @@ Con el RTT suavizado la ventana crecía junto con la cola y dejaba crecer más l
 
 El límite real del receptor no es el *socket* sino el navegador: decodificar *tiles* y subirlos a la GPU toma tiempo. Por eso la ventana de recepción se mide ahí:
 
-`rwnd = 2 MiB − (bytes reenviados al visor − bytes que el visor ya procesó)`
+`rwnd = buffer − (bytes reenviados al visor − bytes que el visor ya procesó)`
 
-El visor cuenta un paquete de *splats* como procesado al dibujarlo y un *tile* al terminar de decodificarlo, y lo informa cada 50 ms (`consumed`). La diferencia incluye lo que espera en el WebSocket y lo que espera ser decodificado. Si `rwnd` llega a 0 el servidor se detiene; cuando el visor se pone al día, el *client half* envía un `ACK` de actualización de ventana (cambio de al menos 16 paquetes o 25 %) y los datos siguen. Medido: una página que dejó de procesar detuvo al servidor en exactamente 2.00 MB, y al ponerse al día los datos siguieron de inmediato.
+`buffer = min(2 MiB, max(128 KB, ritmo de vaciado del visor × 1 s))`
+
+El visor cuenta un paquete de *splats* como procesado al dibujarlo y un *tile* al terminar de decodificarlo, y lo informa cada 50 ms (`consumed`). La diferencia incluye lo que espera en el WebSocket y lo que espera ser decodificado. Si `rwnd` llega a 0 el servidor se detiene; cuando el visor se pone al día, el *client half* envía un `ACK` de actualización de ventana (cambio de al menos 16 paquetes o 25 %) y los datos siguen. Medido: una página que dejó de procesar detuvo al servidor en exactamente 2.00 MB, y al ponerse al día los datos siguieron de inmediato. El buffer se ajusta a cada página: el ritmo de vaciado son los bytes que el visor procesó en el último segundo, el mejor de los últimos 10 s, y se vuelve a medir cuando los datos reanudan tras una pausa. Fijo en 2 MiB, en un enlace de 400 kbit/s (el 3G de Chrome) eran 40 s de datos en cola delante del visor, y cada vista nueva esperaba detrás de lo que iba para las anteriores. Medido con ese enlace: la vista a la que se llegó con el zoom empezó a dibujarse a los 3.5 s en vez de 41 s y terminó a los 28 s en vez de 65 s, con 1.3 MB recibidos en vez de 3.1 MB. En una página local el buffer llega a 2 MiB en pocos informes y nada cambió (0.2 s por vista).
 
 ### 7.5 Slow start
 
