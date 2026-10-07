@@ -16,7 +16,8 @@
 //           port only redirects to the server site
 //
 // Two WebSockets:
-//   /ws       the viewer's session: one at a time (a new page takes over)
+//   /ws       a viewer's session: every page gets its own (its own UDP socket, so the server
+//             sees each page as a separate user), closed with the page
 //   /catalog  the image list asks for the catalog (LIST/CATALOG over our protocol); answers
 //             {type: "catalog", images, site} or {type: "fault", message}, then closes
 //
@@ -46,38 +47,66 @@ const { values: args } = parseArgs({
   },
 });
 const upstream = parseImpairment(args.impair);
+// the catalog needs no session: one link answers every list page
 const link = new ClientLink(args.server, upstream);
-let browser: WebSocket | null = null;
 
-// Flow control: the receive window the server is told is the receive buffer minus what the
-// page has not handled yet. That counts both what waits in the WebSocket and what the page
-// holds but has not decoded, so a busy browser slows the server down.
-let forwarded = 0, consumed = 0;
-link.receiveWindow = () => (browser ? Math.max(0, RECV_BUFFER - (forwarded - consumed)) : 0);
-
-function toBrowser(data: string | Buffer): void {
-  if (!browser || browser.readyState !== browser.OPEN) return;
-  if (typeof data !== "string") forwarded += data.length;
-  browser.send(data);
+/**
+ * One viewer page: its own session with the server over its own UDP socket, the data handed
+ * to that page as it lands. Flow control: the receive window the server is told is the
+ * receive buffer minus what the page has not handled yet, counting both what waits in the
+ * WebSocket and what the page holds but has not decoded, so a busy browser slows the server.
+ */
+async function session(ws: WebSocket): Promise<void> {
+  const own = new ClientLink(args.server, upstream);
+  let forwarded = 0, consumed = 0, open = true;
+  own.receiveWindow = () => (open ? Math.max(0, RECV_BUFFER - (forwarded - consumed)) : 0);
+  const toBrowser = (data: string | Buffer): void => {
+    if (ws.readyState !== ws.OPEN) return;
+    if (typeof data !== "string") forwarded += data.length;
+    ws.send(data);
+  };
+  own.events = {
+    welcome: () => toBrowser(JSON.stringify({ type: "link", state: "connected", server: args.server })),
+    chart: (chart) => toBrowser(JSON.stringify({ type: "chart", ...chart })),
+    stats: (server) => toBrowser(JSON.stringify({ type: "stats", server, client: own.received })),
+    fault: (message) => toBrowser(JSON.stringify({ type: "fault", message })),
+    // blobs are useful on their own: straight through, no waiting for the rest of the unit
+    confetti: (payload) => toBrowser(Buffer.concat([Buffer.from([1]), payload])),
+    tile: (level, x, y, format, data) => {
+      const head = Buffer.alloc(11);
+      head[0] = 2;
+      head[1] = level;
+      head.writeUInt32BE(x, 2);
+      head.writeUInt32BE(y, 6);
+      head[10] = format;
+      toBrowser(Buffer.concat([head, data]));
+    },
+  };
+  // messages that arrive before the socket is bound wait for it
+  const early: Buffer[] = [];
+  ws.on("message", (data, isBinary) => { if (!isBinary) early.push(data as Buffer); });
+  ws.on("close", () => {
+    open = false;
+    own.bye();
+    setTimeout(() => own.close(), 200);            // let BYE leave first
+    pages.delete(ws);
+  });
+  await own.bind();
+  if (!open) return;
+  own.hello();
+  const handle = (data: Buffer): void => {
+    const msg = JSON.parse(data.toString());
+    if (msg.type === "open") own.open(String(msg.image));
+    else if (msg.type === "consumed") consumed = Math.min(forwarded, Number(msg.bytes) || 0);
+    else if (msg.type === "view") {
+      own.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped);
+    }
+  };
+  ws.removeAllListeners("message");
+  ws.on("message", (data, isBinary) => { if (!isBinary) handle(data as Buffer); });
+  for (const data of early) handle(data);
 }
-
-link.events = {
-  welcome: () => toBrowser(JSON.stringify({ type: "link", state: "connected", server: args.server })),
-  chart: (chart) => toBrowser(JSON.stringify({ type: "chart", ...chart })),
-  stats: (server) => toBrowser(JSON.stringify({ type: "stats", server, client: link.received })),
-  fault: (message) => toBrowser(JSON.stringify({ type: "fault", message })),
-  // blobs are useful on their own: straight through, no waiting for the rest of the unit
-  confetti: (payload) => toBrowser(Buffer.concat([Buffer.from([1]), payload])),
-  tile: (level, x, y, format, data) => {
-    const head = Buffer.alloc(11);
-    head[0] = 2;
-    head[1] = level;
-    head.writeUInt32BE(x, 2);
-    head.writeUInt32BE(y, 6);
-    head[10] = format;
-    toBrowser(Buffer.concat([head, data]));
-  },
-};
+const pages = new Set<WebSocket>();
 
 // Which pages may connect: the server's site, this machine, and --origins. Browsers send the
 // page's origin with a WebSocket handshake; anything else is refused.
@@ -146,25 +175,9 @@ catalogs.on("connection", async (ws) => {
 });
 
 sessions.on("connection", (ws) => {
-  if (browser) browser.close(1000, "another viewer took over this client half");
-  browser = ws;
-  forwarded = consumed = 0;
-  link.hello();          // a fresh page holds nothing: the server must forget what it sent
-  ws.on("message", (data, isBinary) => {
-    if (isBinary) return;
-    const msg = JSON.parse(data.toString());
-    if (msg.type === "open") link.open(String(msg.image));
-    else if (msg.type === "consumed" && browser === ws) consumed = Math.min(forwarded, Number(msg.bytes) || 0);
-    else if (msg.type === "view") {
-      link.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped);
-    }
-  });
-  ws.on("close", () => {
-    if (browser === ws) {
-      browser = null;
-      link.bye();
-    }
-  });
+  pages.add(ws);
+  console.log(`page connected (${pages.size} open)`);
+  void session(ws);
 });
 
 await link.bind();
