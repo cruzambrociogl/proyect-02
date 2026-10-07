@@ -10,6 +10,10 @@
 // --origins hosts whose pages may connect, besides the server's host and this machine
 //           (a page from any other site is refused: it could otherwise drive this session).
 //           "*.devtunnels.ms" accepts every subdomain: a tunnel whose address changes
+// --proxy   also pass the server site's pages through this port, so a browser on another
+//           device reaches everything through one forwarded port (testing through a tunnel).
+//           The pages are still the server's; uploads are not passed through. Off: this
+//           port only redirects to the server site
 //
 // Two WebSockets:
 //   /ws       the viewer's session: one at a time (a new page takes over)
@@ -38,6 +42,7 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "8090" },
     impair: { type: "string", default: "none" },
     origins: { type: "string", default: "" },
+    proxy: { type: "boolean", default: false },
   },
 });
 const upstream = parseImpairment(args.impair);
@@ -80,26 +85,46 @@ const serverHost = args.server.split(":")[0];
 let site = 8000;                                   // the server site's port, learned from CATALOG
 const allowed = new Set(["127.0.0.1", "localhost", "[::1]", serverHost,
                          ...args.origins.split(",").map((s) => s.trim()).filter(Boolean)]);
-function originAllowed(origin: string | undefined): boolean {
+function originAllowed(origin: string | undefined, reqHost: string | undefined): boolean {
   if (!origin) return true;                        // not a browser (a test client)
-  let host: string;
-  try { host = new URL(origin).hostname; } catch { return false; }
+  let host: string, originHost: string;
+  try { const u = new URL(origin); host = u.hostname; originHost = u.host; } catch { return false; }
   if (allowed.has(host)) return true;
+  if (args.proxy && reqHost && originHost === reqHost) return true;   // a page this port served
   // "*.example.com" in --origins: any subdomain of it (never example.com's lookalikes)
   for (const a of allowed) if (a.startsWith("*.") && host.endsWith(a.slice(1))) return true;
   return false;
 }
 
-// HTTP here only points the browser at the server's site, where the pages are.
-const http = createServer((req, res) => {
-  res.writeHead(302, { Location: `http://${serverHost}:${site}/${args.port === "8090" ? "" : `?client=127.0.0.1:${args.port}`}` }).end();
+// HTTP here only points the browser at the server's site, where the pages are; with --proxy
+// it passes them through instead, telling each page that its client half is at this address.
+const http = createServer(async (req, res) => {
+  if (!args.proxy) {
+    res.writeHead(302, { Location: `http://${serverHost}:${site}/${args.port === "8090" ? "" : `?client=127.0.0.1:${args.port}`}` }).end();
+    return;
+  }
+  if (req.method !== "GET") {
+    res.writeHead(405, { "Content-Type": "text/plain" }).end(`only pages pass through here: add and prepare images at http://${serverHost}:${site}/admin`);
+    return;
+  }
+  try {
+    const r = await fetch(`http://${serverHost}:${site}${req.url ?? "/"}`, { redirect: "manual" });
+    const type = r.headers.get("content-type") ?? "application/octet-stream";
+    let body = Buffer.from(await r.arrayBuffer());
+    if (type.startsWith("text/html")) {
+      body = Buffer.from(body.toString("utf8").replace("<head>", "<head><script>window.CLIENT_HALF = location.host;</script>"));
+    }
+    res.writeHead(r.status, { "Content-Type": type, "Cache-Control": r.headers.get("cache-control") ?? "no-cache" }).end(body);
+  } catch (e) {
+    res.writeHead(502, { "Content-Type": "text/plain" }).end(`cannot reach the server site at http://${serverHost}:${site}: ${e}`);
+  }
 });
 
 const sessions = new WebSocketServer({ noServer: true });
 const catalogs = new WebSocketServer({ noServer: true });
 http.on("upgrade", (req, socket, head) => {
   const path = new URL(req.url ?? "/", "http://x").pathname;
-  if (!originAllowed(req.headers.origin)) {
+  if (!originAllowed(req.headers.origin, req.headers["x-forwarded-host"] as string ?? req.headers.host)) {
     console.log(`refused a page from ${req.headers.origin} (allow it with --origins)`);
     socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
     return;

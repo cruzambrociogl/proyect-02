@@ -380,10 +380,22 @@ const imageName = query.get("image") ?? "";
 // The page comes from the server's site over HTTP; the image comes through the client half on
 // this machine, over a local WebSocket. ws:// to this machine is allowed even from an https
 // page; a client half reached through a tunnel (?client=HOST) needs wss:// from one.
-const clientHalf = query.get("client") ?? "127.0.0.1:8090";
+// (a page passed through the client half's --proxy knows it is at the page's own address)
+const clientHalf = query.get("client") ?? (window as { CLIENT_HALF?: string }).CLIENT_HALF ?? "127.0.0.1:8090";
 const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(clientHalf);
 const wsScheme = location.protocol === "https:" && !loopback ? "wss" : "ws";
 let linkState = `connecting to the client half at ${clientHalf}`;
+/** Why the client half could not be reached, worded for where this page was opened. */
+function unreachable(at: string): string {
+  const here = /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+  if (loopback && !here) {
+    return `cannot reach a client half at ${at}. On this computer: start it (add --origins "${location.hostname}" ` +
+           `for a page opened through a tunnel). From another device: start it with --proxy and open the page ` +
+           `through its forwarded port, 8090.`;
+  }
+  return `cannot reach the client half at ${at}: it is not running, or it refused this page ` +
+         `(start it with --origins ${location.hostname})`;
+}
 const ws = new WebSocket(`${wsScheme}://${clientHalf}/ws`);
 ws.binaryType = "arraybuffer";
 ws.onopen = () => {
@@ -392,8 +404,7 @@ ws.onopen = () => {
   ws.send(JSON.stringify({ type: "open", image: imageName }));
 };
 ws.onclose = () => {
-  linkState = M ? "closed" : `cannot reach the client half at ${clientHalf}: it is not running, or it refused ` +
-    `this page (start it with --origins ${location.hostname})`;
+  linkState = M ? "closed" : unreachable(clientHalf);
   dirty = true;
 };
 ws.onmessage = (e) => {
