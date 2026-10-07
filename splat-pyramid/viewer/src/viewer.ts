@@ -644,6 +644,15 @@ function frame(): void {
     }
   }
 
+  // The image's real outline on screen. A level's width and height are rounded up when halved,
+  // so its last column and row of pixels stand for less than a full pixel of the image (at
+  // level 8 of a 176,393 px image, the last column holds 9 real pixels drawn 256 wide). Drawn
+  // whole, that sliver ran past the image's edge as a dark line when zoomed out. Everything
+  // is clipped to the outline instead.
+  const [ox0, oy0] = toScreen(0, 0), [ox1, oy1] = toScreen(c.width, c.height);
+  const ix0 = Math.max(0, Math.round(ox0)), iy0 = Math.max(0, Math.round(oy0));
+  const ix1 = Math.min(cw, Math.round(ox1)), iy1 = Math.min(ch, Math.round(oy1));
+
   ensureTargets(cw, ch);
   gl.viewport(0, 0, cw, ch);
   gl.useProgram(blobProg.p);
@@ -660,7 +669,8 @@ function frame(): void {
     gl.uniform1i(blobProg.u.u_mode, mode);
     for (const { u, x0, y0, x1, y1, s } of list) {
       if (!u.count || !u.vao) continue;
-      const sx0 = Math.round(x0), sx1 = Math.round(x1), sy0 = Math.round(y0), sy1 = Math.round(y1);
+      const sx0 = Math.max(ix0, Math.round(x0)), sx1 = Math.min(ix1, Math.round(x1));
+      const sy0 = Math.max(iy0, Math.round(y0)), sy1 = Math.min(iy1, Math.round(y1));
       if (sx1 <= sx0 || sy1 <= sy0) continue;
       gl.scissor(sx0, ch - sy1, sx1 - sx0, sy1 - sy0);
       gl.uniform2f(blobProg.u.u_origin, x0, y0);
@@ -686,7 +696,9 @@ function frame(): void {
   gl.bindVertexArray(composeVao);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  if (tileList.length) {
+  if (tileList.length && ix1 > ix0 && iy1 > iy0) {
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(ix0, ch - iy1, ix1 - ix0, iy1 - iy0);
     gl.useProgram(tileProg.p);
     gl.uniform2f(tileProg.u.u_view, cw, ch);
     gl.uniform1i(tileProg.u.u_tex, 0);
@@ -698,6 +710,7 @@ function frame(): void {
       gl.uniform4f(tileProg.u.u_rect, ...rect);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
+    gl.disable(gl.SCISSOR_TEST);
   }
 
   // what is on screen now, and how much of the screen each drawn unit covers
