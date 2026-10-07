@@ -1,6 +1,6 @@
 # Protocolo SP — Documento del protocolo de imagen
 
-Cruz Israel Ambrocio Tepax · Ciencias de la Computación VIII · 4 de octubre de 2026
+Rosangela Rodriguez (22000127) · Cruz Ambrocio (20005588) · Ciencias de la Computación VIII · 6 de octubre de 2026
 
 ## 1. Resumen
 
@@ -404,7 +404,7 @@ El servidor prepara cada unidad una sola vez y la sirve a todos los usuarios des
 
 ### 8.1 Physarum en el servidor (Tero y Nakagaki)
 
-El moho mucilaginoso *Physarum polycephalum* construye su red por retroalimentación: la conductancia D de un tubo crece con el flujo Q que lo atraviesa y decae sin él, y el flujo se reparte entre tubos paralelos según su conductancia (Tero et al., 2007 y 2010):
+El moho mucilaginoso *Physarum polycephalum* construye su red por retroalimentación: la conductancia D de un tubo crece con el flujo Q que lo atraviesa y decae sin él, y el flujo se reparte entre tubos paralelos según su conductancia (Tero et al., 2007):
 
 `dD/dt = f(|Q|) − D`
 
@@ -450,7 +450,7 @@ El lienzo se dibuja con un presupuesto de píxeles: la densidad de la pantalla, 
 
 ## 9. Políticas y decisiones de diseño
 
-Las políticas fijan qué hace el sistema en cada situación; las decisiones de diseño explican por qué se eligió cada mecanismo frente a sus alternativas. El apéndice A ubica cada una en el código y el apéndice B reúne sus parámetros.
+Las políticas fijan qué hace el sistema en cada situación; las decisiones de diseño explican por qué se eligió cada mecanismo frente a sus alternativas.
 
 ### 9.1 Políticas
 
@@ -574,109 +574,25 @@ La preparación tomó 12 min para la de 55 GB y unos 21 min de trabajo para la d
 
 Se registran porque explican el diseño final: entregar la tasa promedio al salir del *slow start* (el enlace móvil quedó en 1.3 Mbit/s); salir solo por pérdida (las ráfagas aleatorias lo terminaban antes de tiempo); salir solo por entrega plana (los `ACK` agrupados lo engañaban); calcular la ventana con el RTT suavizado (crecía con la cola); y el reparto de subida de Physarum y el modelo de Apolonio, sin ganancia medible.
 
-## 12. Limitaciones y trabajo futuro
-
-- **Client half obligatorio.** El navegador no abre sockets UDP, así que cada máquina que visualiza corre un proceso local. Un transporte en el navegador (WebTransport sobre QUIC) lo eliminaría.
-- **Imagen de 24 GB.** Se prepararon y sirven las de 17, 28, 55 y 93 GB; falta la de 24 GB (la fotografía del ESO). Al ser una foto y no dígitos, su detalle real y su límite de zoom serán distintos.
-- **Espacio al preparar.** El pico de disco es unas 5.5 veces el resultado, porque se guardan a la vez los *tiles* JPEG y WebP. Elegir el formato *tile* por *tile* durante el corte lo reduciría.
-- **Reconexión.** Una página que se reconecta abre una sesión nueva; el servidor no sabe qué tiene ya la página y le reenvía la vista actual (0.22 MB en la prueba). Es aceptable porque solo ocurre tras una desconexión.
-- **Run-and-tumble en enlaces con jitter** sube en pasos de 5 % y tarda en alcanzar la capacidad; por eso el salto en el enlace móvil es 0.12 s más lento que con el arranque fijo anterior.
-- **Reparto de la subida con Physarum** no mostró ganancia, porque las épocas ya evitan que un usuario en movimiento acumule datos inútiles.
-- **Redes emuladas.** Las mediciones de enlaces usan un emulador; las pruebas con varios dispositivos reales (computadora, tableta, PC) se hicieron a través del reenvío de puertos de VS Code.
-- **Número de secuencia de 32 bits.** Da la vuelta tras unos 4,300 millones de paquetes (unos 5 TB) por sesión; no se maneja la vuelta porque una sesión nunca se acerca a ese volumen.
-
-## 13. Referencias
+## 12. Referencias
 
 **RFC**
 
 - J. Postel, "User Datagram Protocol", [RFC 768](https://www.rfc-editor.org/rfc/rfc768), agosto de 1980.
 - W. Eddy (ed.), "Transmission Control Protocol (TCP)", [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293), 2022. Referencia técnica para secuencia, ACK, ventanas y control de flujo.
 - M. Mathis, J. Mahdavi, S. Floyd, A. Romanow, "TCP Selective Acknowledgment Options", [RFC 2018](https://www.rfc-editor.org/rfc/rfc2018), octubre de 1996.
-- M. Allman, V. Paxson, E. Blanton, "TCP Congestion Control", [RFC 5681](https://www.rfc-editor.org/rfc/rfc5681), septiembre de 2009. Slow start y reinicio tras inactividad.
-- J. Chu, N. Dukkipati, Y. Cheng, M. Mathis, "Increasing TCP's Initial Window", [RFC 6928](https://www.rfc-editor.org/rfc/rfc6928), abril de 2013. Ventana inicial de 10 segmentos.
-- P. Balasubramanian, Y. Huang, M. Olson, "HyStart++: Modified Slow Start for TCP", [RFC 9406](https://www.rfc-editor.org/rfc/rfc9406), 2023. Conservative Slow Start, CSS\_GROWTH\_DIVISOR = 4 y CSS\_ROUNDS = 5.
-- V. Paxson, M. Allman, J. Chu, M. Sargent, "Computing TCP's Retransmission Timer", [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298), junio de 2011. RTO y backoff exponencial.
-- G. Fairhurst, A. Sathiaseelan, R. Secchi, "Updating TCP to Support Rate-Limited Traffic", [RFC 7661](https://www.rfc-editor.org/rfc/rfc7661), octubre de 2015. Conservar la ventana durante pausas de la aplicación.
-- S. Floyd, "Congestion Control Principles", [RFC 2914](https://www.rfc-editor.org/rfc/rfc2914) (BCP 41), septiembre de 2000.
-- L. Eggert, G. Fairhurst, G. Shepherd, "UDP Usage Guidelines", [RFC 8085](https://www.rfc-editor.org/rfc/rfc8085) (BCP 145), marzo de 2017.
-- J. Lacan, V. Roca, J. Peltotalo, S. Peltotalo, "Reed-Solomon Forward Error Correction (FEC) Schemes", [RFC 5510](https://www.rfc-editor.org/rfc/rfc5510), abril de 2009. Códigos de borrado sobre GF(2^8).
-- M. Luby, A. Shokrollahi, M. Watson, T. Stockhammer, L. Minder, "RaptorQ Forward Error Correction Scheme for Object Delivery", [RFC 6330](https://www.rfc-editor.org/rfc/rfc6330), agosto de 2011. Códigos fuente sistemáticos (rateless).
-- I. Fette, A. Melnikov, "The WebSocket Protocol", [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455), diciembre de 2011.
-- R. Fielding, M. Nottingham, J. Reschke (eds.), "HTTP Semantics", [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), junio de 2022.
+- M. Allman, V. Paxson, E. Blanton, "TCP Congestion Control", [RFC 5681](https://www.rfc-editor.org/rfc/rfc5681), septiembre de 2009.
+- V. Paxson, M. Allman, J. Chu, M. Sargent, "Computing TCP's Retransmission Timer", [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298), junio de 2011.
+- J. Chu, N. Dukkipati, Y. Cheng, M. Mathis, "Increasing TCP's Initial Window", [RFC 6928](https://www.rfc-editor.org/rfc/rfc6928), abril de 2013.
+- G. Fairhurst, A. Sathiaseelan, R. Secchi, "Updating TCP to Support Rate-Limited Traffic", [RFC 7661](https://www.rfc-editor.org/rfc/rfc7661), octubre de 2015.
+- P. Balasubramanian, Y. Huang, M. Olson, "HyStart++: Modified Slow Start for TCP", [RFC 9406](https://www.rfc-editor.org/rfc/rfc9406), 2023.
+- J. Lacan, V. Roca, J. Peltotalo, S. Peltotalo, "Reed-Solomon Forward Error Correction (FEC) Schemes", [RFC 5510](https://www.rfc-editor.org/rfc/rfc5510), abril de 2009.
 
 **Publicaciones**
 
-- H. C. Berg, [*E. coli in Motion*](https://doi.org/10.1007/b97370), Springer, Nueva York, 2004. Run-and-tumble.
+- H. C. Berg, [*E. coli in Motion*](https://doi.org/10.1007/b97370), Springer, Nueva York, 2004.
 - A. Tero, R. Kobayashi, T. Nakagaki, ["A mathematical model for adaptive transport network in path finding by true slime mold"](https://doi.org/10.1016/j.jtbi.2006.07.015), *Journal of Theoretical Biology* 244(4), 553–564, 2007.
-- A. Tero, S. Takagi, T. Saigusa, K. Ito, D. P. Bebber, M. D. Fricker, K. Yumiki, R. Kobayashi, T. Nakagaki, ["Rules for Biologically Inspired Adaptive Network Design"](https://doi.org/10.1126/science.1177894), *Science* 327(5964), 439–442, 2010.
-- H. Ebbinghaus, [*Über das Gedächtnis. Untersuchungen zur experimentellen Psychologie*](https://www.loc.gov/item/e11000616/), Duncker & Humblot, Leipzig, 1885. Curva del olvido.
-- N. Cardwell, Y. Cheng, C. S. Gunn, S. Hassas Yeganeh, V. Jacobson, ["BBR: Congestion-Based Congestion Control"](https://doi.org/10.1145/3012426.3022184), *ACM Queue* 14(5), 20–53, 2016. Ventana a partir del RTT mínimo y filtro de máximo de la entrega.
+- H. Ebbinghaus, [*Über das Gedächtnis*](https://www.loc.gov/item/e11000616/), Duncker & Humblot, Leipzig, 1885.
+- N. Cardwell, Y. Cheng, C. S. Gunn, S. Hassas Yeganeh, V. Jacobson, ["BBR: Congestion-Based Congestion Control"](https://doi.org/10.1145/3012426.3022184), *ACM Queue* 14(5), 20–53, 2016.
 - B. Kerbl, G. Kopanas, T. Leimkühler, G. Drettakis, ["3D Gaussian Splatting for Real-Time Radiance Field Rendering"](https://doi.org/10.1145/3592433), *ACM Transactions on Graphics* 42(4), 2023.
-- D. Dhar, ["Self-organized critical state of sandpile automaton models"](https://doi.org/10.1103/PhysRevLett.64.1613), *Physical Review Letters* 64(14), 1613–1616, 1990. Modelo de caché anterior.
-- G. M. Morton, [*A Computer Oriented Geodetic Data Base and a New Technique in File Sequencing*](https://www.scirp.org/reference/referencespapers?referenceid=1109616), informe técnico, IBM Ltd., Ottawa, 1966. Orden Morton.
-
-## Apéndice A. Mapa de implementación
-
-Dónde está cada mecanismo en el código (carpeta `splat-pyramid/`). Se nombran archivos y funciones, no líneas, para que el mapa siga siendo válido al editar.
-
-| Mecanismo | Archivo | Función o clase |
-| --- | --- | --- |
-| Cabecera y codificación de cada mensaje (5.1 a 5.4) | `shared/wire.ts` | `encode`, `decode`, `versionOf`; `encodeView`, `encodeReport`, `encodeAck`, `encodeRepair`, `encodeCatalog` y sus `decode` |
-| Empaquetado Confetti (7.1) | `shared/units.ts` | `confetti` |
-| Partes de un *tile* | `shared/units.ts` | `tileParts`, `readTilePart` |
-| Código de borrado sobre GF(256) (7.2) | `shared/fec.ts` | `coefficients`, `repairSymbol`, `frame`, `BlockDecoder` |
-| Sesión, épocas y plan de envío (6.2, 6.3) | `server/session.ts` | `Session.onMessage`, `plan`, `nextWork` |
-| Reparación (7.2) | `server/session.ts` | `Session.repairDue`, `deficit`, `repair` |
-| Secuencia, ventana, `ACK`, RTO y *backoff* (7.3) | `server/session.ts` | `Session.pump`, `windowOpen`, `onAck` |
-| *Slow start*, CSS y cwnd (7.5) | `server/tumble.ts` | `RunAndTumble.onAck`, `enterSlowStart`, `leaveSlowStart`, `cwnd`, `minRtt` |
-| *Run-and-tumble* (7.6) | `server/tumble.ts` | `RunAndTumble.onReport`, `change` |
-| Ritmo y tope global (7.7) | `server/main.ts` | bucle de ritmo cada `TICK_MS` |
-| Admisión por cliente (6.4) | `server/main.ts` | `admit` |
-| Physarum (8.1) | `server/physarum.ts` | `Physarum.flowed`, `adapt`, `through`, `node` |
-| Caché de paquetes del servidor (8.1) | `server/session.ts` | `PacketCache.packets`, `evict` |
-| Unidades que necesita una vista | `server/image.ts` | `PreparedImage.unitsFor`, `levelFor` |
-| Sitio HTTP: páginas, carga y preparación | `server/admin.ts` | `startAdmin` |
-| Sesión del cliente: `ACK`, `REPORT`, reintentos, reensamblado (6, 7) | `client/link.ts` | `ClientLink.noteData`, `ack`, `report`, `retry`, `onPacket`, `onRepair` |
-| Una sesión por página, latido, orígenes (5.5, 6.4) | `client/main.ts` | `session`, `originAllowed`, latido cada `HEARTBEAT_MS` |
-| Ventana de recepción (7.4) | `client/main.ts`; `viewer/src/viewer.ts` | `receiveWindow` en `session`; contador `consumed` |
-| Caché del navegador (8.2) | `viewer/src/forgetting.ts` | `ForgettingCache.frame`, `evict` |
-| Reconexión (6.4) | `viewer/src/viewer.ts` | `connect`, `reconnectNow` |
-| Dibujo, nivel y recorte al contorno | `viewer/src/viewer.ts` | `frame`, `magnifyLimit` |
-| Preparación: corte y pirámide (4.1) | `splatpyr/pyramid.py` | `ingest`, `_ingest_vips` |
-| Preparación: *splats* (4.2) | `splatpyr/build.py`, `fit.py`, `polish.py`, `codec.py` | `build`, `fit_unit`, `solve_colours`, `polish`, `encode` |
-| Detalle real (4.3) | `splatpyr/detail.py` | `measure` |
-
-## Apéndice B. Parámetros
-
-| Parámetro | Valor | Dónde | Por qué |
-| --- | --- | --- | --- |
-| Datagrama máximo | 1,200 bytes | `shared/wire.ts` `MAX_DATAGRAM` | No fragmentar en IP sobre rutas con MTU ≥ 1,280 |
-| Cabecera | 20 bytes | `shared/wire.ts` `HEADER` | Sección 5.1 |
-| *Blobs* por paquete | 100 | `shared/units.ts` `BLOBS_PER_PACKET` | Un `REPAIR` de ese paquete aún cabe en 1,200 bytes |
-| Paquetes por bloque | ≤ 64 | `shared/fec.ts` `MAX_K` | Decodificación barata |
-| Intervalo de `REPORT` | 100 ms | `client/link.ts` `REPORT_MS` | Ritmo de evaluación del controlador |
-| `ACK` | cada 16 paquetes; máx. uno por 5 ms; a más tardar 20 ms | `client/link.ts` `ACK_EVERY`, `ACK_GAP_MS`, `ACK_DELAY_MS` | Que el *slow start* crezca por RTT y no por `REPORT` |
-| Reintento de control | 300 ms | `client/link.ts` `RETRY_MS` | Algo más que un RTT del enlace móvil emulado (240 ms) |
-| Buffer de recepción | 2 MiB | `client/link.ts` `RECV_BUFFER` | Cubre unos 100 *tiles* pendientes de decodificar |
-| Ventana inicial | 10 paquetes | `server/tumble.ts` `IW` | RFC 6928 |
-| Salida del *slow start* por cola | 25 ms, con ≥ 20 paquetes | `server/tumble.ts` `SS_EXIT_MS`, `SS_EXIT_PACKETS` | Por encima del *jitter* del enlace móvil medido |
-| Conservative Slow Start | crecimiento / 4 durante 5 RTT | `server/tumble.ts` `CSS_GROWTH_DIVISOR`, `CSS_ROUNDS` | RFC 9406 |
-| Salida por enlace que descarta | > 10 % perdido de ≥ 64 paquetes y crecimiento < 25 % | `server/tumble.ts` `SS_EXIT_LOSS`, `SS_LOSS_PACKETS`, `PLATEAU_GROWTH` | Las dos condiciones juntas; cada una sola fallaba (11.6) |
-| Prueba en el tope del servidor | 3 RTT | `server/tumble.ts` `CAP_ROUNDS` | Confirmar que el enlace acepta el tope |
-| cwnd tras el *slow start* | 2 × tasa × (RTT mínimo + 20 ms) | `server/tumble.ts` `WINDOW_GAIN` | Como BBR: el ritmo fija la velocidad y la ventana el límite |
-| RTO | max(200 ms, 3 · srtt), *backoff* hasta 64× | `server/session.ts` `MIN_RTO_MS`, `MAX_BACKOFF` | RFC 6298, con un mínimo menor (7.3) |
-| Reinicio tras inactividad | 10 s | `server/tumble.ts` `IDLE_RESTART_MS` | RFC 7661: pausas cortas conservan la ventana |
-| Puntaje de *run-and-tumble* | τ = 80 ms; corte si la cola > 150 ms | `server/tumble.ts` `TAU_MS`, `Q_MAX_MS` | τ muy por encima del *jitter* de un intervalo |
-| Pasos | 5 % a 50 %; mejora mínima 2 %; ≥ 80 paquetes por evaluación | `server/tumble.ts` `S_MIN`, `S_MAX`, `EPS`, `MIN_JUDGE_PACKETS` | Un 5 % se distingue del ruido con 80 paquetes |
-| Tasa mínima | 256 kbit/s | `server/tumble.ts` `RATE_MIN` | Nunca dejar de avanzar |
-| Reparación | tras srtt + 250 ms; máx. 6; +1 símbolo de reserva | `server/session.ts` `REPAIR_SLACK_MS`, `MAX_TOPUPS`, `REPAIR_SPARE` | Una reparación perdida no cuesta otra ida y vuelta |
-| Admisión | 60 mensajes/s (120); 250 `ACK`/s (500) | `server/main.ts` `INCOMING_PER_S`, `ACKS_PER_S` | Muy por encima de un visor real, por debajo de una inundación |
-| Fin de sesión | 30 s sin mensajes | `server/main.ts` `SESSION_TIMEOUT_MS` | 300 `REPORT` perdidos seguidos |
-| Latido | 15 s | `client/main.ts` `HEARTBEAT_MS` | Cierra en 15 a 30 s una página que ya no está |
-| Physarum | γ = 0.5; τ = 0.5 s; mínimo 0.1; vidas medias 2 s y 10 s | `server/physarum.ts` | γ < 1 para que los tubos convivan |
-| Caché del servidor | 128 MB | `server/main.ts` `--cache` | Una unidad pedida por varios usuarios se lee y empaqueta una sola vez |
-| Caché del navegador | 32 MB + 48 MB comprimidos | `viewer/src/viewer.ts` `MEMORY_BUDGET`, `STORE_BUDGET` | Por debajo de los 50 MB de la versión anterior |
-| Curva del olvido | S₀ = 4 s · 2^nivel; repaso tras 300 ms fuera; ganancia 3 | `viewer/src/forgetting.ts` | Lo grueso dura más porque está bajo cualquier vista |
-| Zoom máximo | 16 píxeles de pantalla por unidad de detalle; umbral 30 dB | `viewer/src/viewer.ts` `MAX_MAGNIFY`; `splatpyr/detail.py` `DETAIL_PSNR` | Dígitos legibles sin ampliar de más un escaneo suave |
-| Elección de nivel | sesgo 0.25 | `server/image.ts` `LEVEL_BIAS` | Como máximo 1.19× de ampliación antes del nivel siguiente |
-| *Splats* y *tiles* al preparar | ≤ 300 *units*; JPEG 85; WebP si ≤ 1.5× el JPEG | `splatpyr/pyramid.py` `SPLAT_UNITS`, `JPEG_QUALITY`, `LOSSLESS_MAX_RATIO` | Ajuste acotado; texto exacto, fotos pequeñas |
+- D. Dhar, ["Self-organized critical state of sandpile automaton models"](https://doi.org/10.1103/PhysRevLett.64.1613), *Physical Review Letters* 64(14), 1613–1616, 1990.
