@@ -15,6 +15,9 @@
   #hud h1 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
   #stats { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); white-space: pre; }
   #hud label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--muted); }
+  #options { margin-top: 6px; }
+  #options summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  #options summary:hover { color: var(--text); }
   #hud input[type=range] { width: 120px; accent-color: var(--accent); }
   #error { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 16px; text-align: center; }
   @media (max-width: 480px) { #hud { left: 8px; right: 8px; top: 8px; min-width: 0; } }
@@ -25,9 +28,12 @@
 <div id="hud">
   <h1>Not a gallery <a id="back" href="/" style="font-weight:400;font-size:12px;color:var(--accent);margin-left:8px;text-decoration:none">← all images</a></h1>
   <div id="stats">loading…</div>
-  <label>detail levels <input id="detail" type="checkbox" checked></label>
-  <label>image tiles near 1:1 <input id="tiles" type="checkbox" checked></label>
-  <label>exact pixels past 1:1 <input id="exact" type="checkbox" checked></label>
+  <details id="options">
+    <summary>options</summary>
+    <label>detail levels <input id="detail" type="checkbox" checked></label>
+    <label>image tiles near 1:1 <input id="tiles" type="checkbox" checked></label>
+    <label>exact pixels past 1:1 <input id="exact" type="checkbox" checked></label>
+  </details>
 </div>
 <div id="error"></div>
 <script>
