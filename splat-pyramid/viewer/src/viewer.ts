@@ -378,10 +378,13 @@ function reviveTile(L: number, x: number, y: number): boolean {
 const query = new URLSearchParams(location.search);
 const imageName = query.get("image") ?? "";
 // The page comes from the server's site over HTTP; the image comes through the client half on
-// this machine, over a local WebSocket (127.0.0.1 is allowed even from an https page)
+// this machine, over a local WebSocket. ws:// to this machine is allowed even from an https
+// page; a client half reached through a tunnel (?client=HOST) needs wss:// from one.
 const clientHalf = query.get("client") ?? "127.0.0.1:8090";
+const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(clientHalf);
+const wsScheme = location.protocol === "https:" && !loopback ? "wss" : "ws";
 let linkState = `connecting to the client half at ${clientHalf}`;
-const ws = new WebSocket(`ws://${clientHalf}/ws`);
+const ws = new WebSocket(`${wsScheme}://${clientHalf}/ws`);
 ws.binaryType = "arraybuffer";
 ws.onopen = () => {
   linkState = "waiting for server";
@@ -389,7 +392,8 @@ ws.onopen = () => {
   ws.send(JSON.stringify({ type: "open", image: imageName }));
 };
 ws.onclose = () => {
-  linkState = M ? "closed" : `no client half at ${clientHalf}: run node client/main.ts --server <server>:9000`;
+  linkState = M ? "closed" : `cannot reach the client half at ${clientHalf}: it is not running, or it refused ` +
+    `this page (start it with --origins ${location.hostname})`;
   dirty = true;
 };
 ws.onmessage = (e) => {

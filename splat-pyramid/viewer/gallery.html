@@ -35,14 +35,16 @@ const client = new URLSearchParams(location.search).get("client") ?? "127.0.0.1:
 const withClient = client === "127.0.0.1:8090" ? "" : `&client=${encodeURIComponent(client)}`;
 function catalog() {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://${client}/catalog`);
+    const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(client);
+    const ws = new WebSocket(`${location.protocol === "https:" && !loopback ? "wss" : "ws"}://${client}/catalog`);
     let done = false;
     ws.onmessage = (e) => {
       done = true;
       const m = JSON.parse(e.data);
       m.type === "catalog" ? resolve(m) : reject(new Error(m.message));
     };
-    ws.onclose = () => { if (!done) reject(new Error(`no client half at ${client}: run node client/main.ts --server <server>:9000`)); };
+    ws.onclose = () => { if (!done) reject(new Error(`Cannot reach the client half at ${client}: it is not running, ` +
+      `or it refused this page (start it with --origins ${location.hostname}).`)); };
   });
 }
 let last = "";

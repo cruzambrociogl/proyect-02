@@ -36,6 +36,12 @@ server site.
 A client half on another port: add `?client=127.0.0.1:PORT` to the page's address. It only
 accepts pages from the server's host and this machine (`--origins` adds others).
 
+Through a tunnel (VS Code port forwarding, for instance): the client half must accept the
+tunnel's host, `--origins NAME-8000.use.devtunnels.ms`. A browser on this machine needs
+nothing else. A browser on another device has no client half of its own: forward port 8090
+too and open `https://NAME-8000.use.devtunnels.ms/?client=NAME-8090.use.devtunnels.ms` (the
+pages then use wss://).
+
 Server options: `--images data`, `--originals originals`, `--http 8000`, `--port 9000`,
 `--python python3` (the Python with the preprocessing's requirements), `--rate 50` (upload
 cap, Mbit/s). Images can also be prepared by hand: `python3 -m splatpyr ingest IMAGE
