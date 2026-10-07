@@ -7,6 +7,7 @@ everything built before v2 is in [prototype/](prototype/).
 The protocol document (Spanish): [docs/protocolo-sp.md](docs/protocolo-sp.md), also as
 [PDF](protocolo-sp.pdf). The Markdown is the source; the PDF is rendered from it.
 Where each mechanism lives in the code: [MAPA-DEL-CODIGO.md](MAPA-DEL-CODIGO.md).
+The ideas behind it, without the byte-level detail: [GUIA-CONCEPTUAL.md](GUIA-CONCEPTUAL.md).
 
 ## Run
 
