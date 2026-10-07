@@ -176,9 +176,28 @@ catalogs.on("connection", async (ws) => {
 
 sessions.on("connection", (ws) => {
   pages.add(ws);
+  alive.set(ws, true);
+  ws.on("pong", () => alive.set(ws, true));
   console.log(`page connected (${pages.size} open)`);
   void session(ws);
 });
+
+// Heartbeat: a page whose device went to sleep, or vanished without closing, answers no
+// pings. One missed between two rounds and it is closed, and its session with it (BYE), so
+// no session is left open for a page that is gone. A page that comes back reconnects.
+const HEARTBEAT_MS = 15_000;
+const alive = new WeakMap<WebSocket, boolean>();
+setInterval(() => {
+  for (const ws of pages) {
+    if (!alive.get(ws)) {
+      console.log("a page stopped answering: closing its session");
+      ws.terminate();
+      continue;
+    }
+    alive.set(ws, false);
+    ws.ping();
+  }
+}, HEARTBEAT_MS).unref();
 
 await link.bind();
 // learn the server site's port (CATALOG carries it), for the redirect; nothing depends on it

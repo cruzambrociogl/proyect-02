@@ -396,44 +396,82 @@ function unreachable(at: string): string {
   return `cannot reach the client half at ${at}: it is not running, or it refused this page ` +
          `(start it with --origins ${location.hostname})`;
 }
-const ws = new WebSocket(`${wsScheme}://${clientHalf}/ws`);
-ws.binaryType = "arraybuffer";
-ws.onopen = () => {
-  linkState = "waiting for server";
-  if (!imageName) fail("add ?image=NAME to the address");
-  ws.send(JSON.stringify({ type: "open", image: imageName }));
-};
-ws.onclose = () => {
-  linkState = M ? "closed" : unreachable(clientHalf);
-  dirty = true;
-};
-ws.onmessage = (e) => {
-  if (typeof e.data === "string") {
-    const m = JSON.parse(e.data);
-    if (m.type === "chart") {
-      M = m as Chart;
-      cache = new ForgettingCache(MEMORY_BUDGET, M.maxLevel);
-      needFit = true;
-      lastSent = "";
-      dirty = true;
+// The connection to the client half, reopened whenever it is lost: a phone or tablet that
+// locks, or a browser tab put in the background, gets its sockets closed by the system, and a
+// page that never reconnected kept only what it had (coarse levels, stretched). Each new
+// connection is a new session on the server; what the page already holds stays, and the
+// camera with it.
+let ws: WebSocket;
+let generation = 0;                               // which connection a late decode belongs to
+let retryMs = 500, retryTimer = 0, stopped = false;
+
+function connect(): void {
+  clearTimeout(retryTimer);
+  const gen = ++generation;
+  ws = new WebSocket(`${wsScheme}://${clientHalf}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    if (gen !== generation) return;
+    retryMs = 500;
+    linkState = "waiting for server";
+    if (!imageName) { stopped = true; fail("add ?image=NAME to the address"); }
+    // a new session: the server knows nothing yet, so flow control and drops start over and
+    // the current view is sent again once the chart arrives
+    consumed = consumedSent = 0;
+    dropped.length = 0;
+    lastSent = "";
+    ws.send(JSON.stringify({ type: "open", image: imageName }));
+  };
+  ws.onclose = () => {
+    if (gen !== generation || stopped) return;
+    linkState = M ? `connection lost, reconnecting in ${(retryMs / 1000).toFixed(1)} s` : unreachable(clientHalf);
+    dirty = true;
+    retryTimer = window.setTimeout(connect, retryMs);
+    retryMs = Math.min(8000, retryMs * 2);
+  };
+  ws.onmessage = (e) => {
+    if (gen !== generation) return;
+    if (typeof e.data === "string") {
+      const m = JSON.parse(e.data);
+      if (m.type === "chart") {
+        if (!M || M.name !== m.name) {           // a reconnect to the same image keeps it all
+          M = m as Chart;
+          cache = new ForgettingCache(MEMORY_BUDGET, M.maxLevel);
+          needFit = true;
+        }
+        lastSent = "";
+        dirty = true;
+      }
+      else if (m.type === "stats") { serverStats = m; dirty = true; }
+      else if (m.type === "fault") { stopped = true; fail(m.message); }
+      else if (m.type === "link") { linkState = m.state; dirty = true; }
+      return;
     }
-    else if (m.type === "stats") { serverStats = m; dirty = true; }
-    else if (m.type === "fault") fail(m.message);
-    else if (m.type === "link") { linkState = m.state; dirty = true; }
-    return;
-  }
-  const all = new Uint8Array(e.data as ArrayBuffer);
-  net.packets++;
-  net.bytes += all.length;
-  const body = all.subarray(1);
-  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  if (all[0] === 1) {
-    onConfetti(view, body);
-    consumed += all.length;                       // drawn as it landed
-  } else if (all[0] === 2) {
-    void onTile(view, body).finally(() => { consumed += all.length; });   // once decoded
-  } else consumed += all.length;
-};
+    const all = new Uint8Array(e.data as ArrayBuffer);
+    net.packets++;
+    net.bytes += all.length;
+    const body = all.subarray(1);
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    if (all[0] === 1) {
+      onConfetti(view, body);
+      consumed += all.length;                       // drawn as it landed
+    } else if (all[0] === 2) {
+      // once decoded; a decode finishing after a reconnect belongs to the old count
+      void onTile(view, body).finally(() => { if (gen === generation) consumed += all.length; });
+    } else consumed += all.length;
+  };
+}
+
+/** Back on screen, or back online: reconnect now rather than at the next retry. */
+function reconnectNow(): void {
+  if (stopped || document.visibilityState !== "visible") return;
+  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) return;
+  retryMs = 500;
+  connect();
+}
+document.addEventListener("visibilitychange", reconnectNow);
+window.addEventListener("pageshow", reconnectNow);
+window.addEventListener("online", reconnectNow);
 
 // Flow control: tell the client half how much of what it forwarded has been fully handled.
 // What it forwarded minus this is our backlog, and the server's receive window shrinks by it.
@@ -445,6 +483,7 @@ setInterval(() => {
 }, 50);
 
 let lastSent = "", lastSentAt = 0;
+connect();                                      // the first connection (state above is declared)
 function sendView(): void {
   if (!M || ws.readyState !== ws.OPEN) return;
   const now = performance.now();
