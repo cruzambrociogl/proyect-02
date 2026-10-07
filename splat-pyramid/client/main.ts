@@ -8,7 +8,8 @@
 //
 // --impair  emulates the path toward the server (views, reports); see shared/emulator.ts.
 // --origins hosts whose pages may connect, besides the server's host and this machine
-//           (a page from any other site is refused: it could otherwise drive this session)
+//           (a page from any other site is refused: it could otherwise drive this session).
+//           "*.devtunnels.ms" accepts every subdomain: a tunnel whose address changes
 //
 // Two WebSockets:
 //   /ws       the viewer's session: one at a time (a new page takes over)
@@ -81,7 +82,12 @@ const allowed = new Set(["127.0.0.1", "localhost", "[::1]", serverHost,
                          ...args.origins.split(",").map((s) => s.trim()).filter(Boolean)]);
 function originAllowed(origin: string | undefined): boolean {
   if (!origin) return true;                        // not a browser (a test client)
-  try { return allowed.has(new URL(origin).hostname); } catch { return false; }
+  let host: string;
+  try { host = new URL(origin).hostname; } catch { return false; }
+  if (allowed.has(host)) return true;
+  // "*.example.com" in --origins: any subdomain of it (never example.com's lookalikes)
+  for (const a of allowed) if (a.startsWith("*.") && host.endsWith(a.slice(1))) return true;
+  return false;
 }
 
 // HTTP here only points the browser at the server's site, where the pages are.

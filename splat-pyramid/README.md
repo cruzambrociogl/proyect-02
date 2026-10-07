@@ -37,7 +37,8 @@ A client half on another port: add `?client=127.0.0.1:PORT` to the page's addres
 accepts pages from the server's host and this machine (`--origins` adds others).
 
 Through a tunnel (VS Code port forwarding, for instance): the client half must accept the
-tunnel's host, `--origins NAME-8000.use.devtunnels.ms`. A browser on this machine needs
+tunnel's host, `--origins NAME-8000.use.devtunnels.ms`, or any tunnel's, whose address
+changes every time: `--origins "*.devtunnels.ms"`. A browser on this machine needs
 nothing else. A browser on another device has no client half of its own: forward port 8090
 too and open `https://NAME-8000.use.devtunnels.ms/?client=NAME-8090.use.devtunnels.ms` (the
 pages then use wss://).
