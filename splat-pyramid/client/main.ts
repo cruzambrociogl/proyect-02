@@ -84,7 +84,8 @@ async function session(ws: WebSocket): Promise<void> {
   };
   // messages that arrive before the socket is bound wait for it
   const early: Buffer[] = [];
-  ws.on("message", (data, isBinary) => { if (!isBinary) early.push(data as Buffer); });
+  const hold = (data: unknown, isBinary: boolean) => { if (!isBinary) early.push(data as Buffer); };
+  ws.on("message", hold);
   ws.on("close", () => {
     open = false;
     own.bye();
@@ -102,7 +103,7 @@ async function session(ws: WebSocket): Promise<void> {
       own.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped, msg.held);
     }
   };
-  ws.removeAllListeners("message");
+  ws.off("message", hold);                         // only ours: the heartbeat listens too
   ws.on("message", (data, isBinary) => { if (!isBinary) handle(data as Buffer); });
   for (const data of early) handle(data);
 }
@@ -178,6 +179,7 @@ sessions.on("connection", (ws) => {
   pages.add(ws);
   alive.set(ws, true);
   ws.on("pong", () => alive.set(ws, true));
+  ws.on("message", () => alive.set(ws, true));     // a page reporting what it drew is awake
   console.log(`page connected (${pages.size} open)`);
   void session(ws);
 });
@@ -185,6 +187,9 @@ sessions.on("connection", (ws) => {
 // Heartbeat: a page whose device went to sleep, or vanished without closing, answers no
 // pings. One missed between two rounds and it is closed, and its session with it (BYE), so
 // no session is left open for a page that is gone. A page that comes back reconnects.
+// Any message from the page counts as an answer too: on a slow link (Chrome's 3G) the ping
+// waits behind everything already queued for the page, and a page busy drawing that queue
+// was closed as if asleep, losing all of it, again and again.
 const HEARTBEAT_MS = 15_000;
 const alive = new WeakMap<WebSocket, boolean>();
 setInterval(() => {
