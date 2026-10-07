@@ -14,7 +14,7 @@
 
 import { createSocket, type Socket } from "node:dgram";
 import {
-  Type, VERSION, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeAck, encodeReport, versionOf, encodeView, unitKey,
+  Type, VERSION, KIND_SPLAT, KIND_TILE, clockMs, decode, encode, encodeAck, encodeReport, versionOf, encodeView, decodeView, unitKey,
   MAX_COUNTS, MAX_DATAGRAM, decodeCatalogPart, decodeRepair, type BlockCount, type TypeCode, type UnitId, type View,
 } from "../shared/wire.ts";
 import { TILE_HEAD, TILE_PART, WIDTH_SPLAT, WIDTH_TILE, blockOfPacket, readTilePart } from "../shared/units.ts";
@@ -134,15 +134,24 @@ export class ClientLink {
     if (this.welcomed) this.send(Type.OPEN, this.pendingOpen.payload);
   }
 
-  view(v: Omit<View, "dropped">, dropped: UnitId[] = []): void {
-    this.epoch++;
+  /**
+   * A new view. `held` (after a reconnect) is what the page already holds of it; what does not
+   * fit beside the dropped units goes in more VIEWs of the same view right behind, each a new
+   * epoch. Only the last is sent again if lost: a lost earlier one costs a resend, nothing more.
+   */
+  view(v: Omit<View, "dropped" | "held">, dropped: UnitId[] = [], held: UnitId[] = []): void {
     for (const u of dropped) this.units.delete(unitKey(u));   // a resend starts from nothing
-    const all = [...this.pendingDropped, ...dropped];
-    const payload = encodeView({ ...v, dropped: all });
-    this.lastView = { payload, epoch: this.epoch, at: performance.now() };
-    this.send(Type.VIEW, payload);
-    const sent = payload.readUInt16BE(28);
-    this.pendingDropped = all.slice(sent);                    // the rest ride with the next view
+    let drop = [...this.pendingDropped, ...dropped], rest = held;
+    do {
+      this.epoch++;
+      const payload = encodeView({ ...v, dropped: drop, held: rest });
+      this.lastView = { payload, epoch: this.epoch, at: performance.now() };
+      this.send(Type.VIEW, payload);
+      const sent = decodeView(payload);
+      if (drop.length) this.pendingDropped = drop.slice(sent.dropped.length);  // the rest ride with the next view
+      drop = [];
+      rest = rest.slice(sent.held!.length);
+    } while (rest.length);
   }
 
   private retry(now: number): void {

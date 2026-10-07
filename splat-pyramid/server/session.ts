@@ -165,6 +165,7 @@ interface UnitState {
   nextSymbol: Map<number, number>;   // per block: the next repair symbol's number
   lastSend: number;
   topups: number;
+  whole?: boolean;       // the client said it holds all of it (a VIEW's held list)
 }
 
 export class Session {
@@ -184,6 +185,7 @@ export class Session {
   packetsSent = 0;
   bytesSent = 0;
   unitsSent = 0;
+  unitsHeld = 0;                         // units the page said it already holds
   viewsSeen = 0;
   cancelled = 0;
   topupPackets = 0;
@@ -294,6 +296,14 @@ export class Session {
         const v = decodeView(m.payload);
         for (const u of v.dropped) this.units.delete(unitKey(u));
         if (m.epoch < this.epoch) return;          // an older view overtook a newer one
+        // what the page already holds (it reconnected): sent whole and received, so neither
+        // sent nor repaired again. Only from a current view: an old one could name a unit the
+        // page has dropped since, and that unit would never come again
+        for (const u of v.held ?? []) {
+          this.units.set(unitKey(u), { id: u, sentUpTo: Infinity, chunksSent: Infinity, held: new Map(),
+                                       nextSymbol: new Map(), lastSend: 0, topups: 0, whole: true });
+          this.unitsHeld++;
+        }
         this.epoch = m.epoch;
         this.view = v;
         this.viewsSeen++;
@@ -509,6 +519,7 @@ export class Session {
 
   /** How many symbols the unit's sent blocks are short, by the client's last count. */
   private deficit(s: UnitState): number {
+    if (s.whole) return 0;
     const p = this.cache.packets(this.image!, s.id);
     let short = 0;
     p.blocks.forEach((b, i) => {
@@ -571,7 +582,7 @@ export class Session {
 
   stats(rate: number): Record<string, unknown> {
     return { epoch: this.epoch, views: this.viewsSeen, queued: this.queue.length,
-             unitsSent: this.unitsSent, packetsSent: this.packetsSent, bytesSent: this.bytesSent,
+             unitsSent: this.unitsSent, unitsHeld: this.unitsHeld, packetsSent: this.packetsSent, bytesSent: this.bytesSent,
              cancelled: this.cancelled, topupPackets: this.topupPackets, topupBytes: this.topupBytes,
              reported: this.reported, rate, control: this.rc.stats(),
              window: { on: this.opts.window, cwndKB: Math.round(this.rc.cwnd / 1024),

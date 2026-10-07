@@ -29,7 +29,7 @@ export const Type = {
   WELCOME: 2,    // server -> client
   OPEN: 3,       // client -> server: image name
   CHART: 4,      // server -> client: the image's shape, JSON
-  VIEW: 5,       // client -> server: where the viewer is looking, and what its cache dropped
+  VIEW: 5,       // client -> server: where the viewer is looking, what its cache dropped and holds
   REPORT: 6,     // client -> server: what arrived
   CONFETTI: 7,   // server -> client: some blobs of a splat unit
   TILEPART: 8,   // server -> client: a piece of an image tile
@@ -102,7 +102,19 @@ export const KIND_SPLAT = 0;
 export const KIND_TILE = 1;
 export const unitKey = (u: UnitId): string => `${u.kind}/${u.level}/${u.x}/${u.y}`;
 
-/** VIEW: centre (level-0 px), scale (level-0 px per screen px), screen size, dropped units. */
+/**
+ * VIEW: centre (level-0 px), scale (level-0 px per screen px), screen size, dropped units, and
+ * held units.
+ *
+ *   0  f64  cx       8  f64  cy      16  f64  scale
+ *  24  u16  screenW  26  u16  screenH
+ *  28  u16  n dropped, then n units of 10 bytes (u8 kind, u8 level, u32 x, u32 y)
+ *  then u16 m held, then m units the same way (absent in a VIEW with none)
+ *
+ * Dropped: the viewer's cache let these go, so the server sends them again when wanted.
+ * Held: units of this view the page already holds whole, sent after a reconnect. A new session
+ * starts knowing nothing of the page, and without them it sent the whole view again.
+ */
 export interface View {
   cx: number;
   cy: number;
@@ -110,41 +122,57 @@ export interface View {
   screenW: number;
   screenH: number;
   dropped: UnitId[];
+  held?: UnitId[];
 }
 
 const VIEW_FIXED = 8 * 3 + 2 * 2 + 2;
-const DROPPED_BYTES = 10;
-/** How many dropped units fit in one VIEW datagram; the rest ride along with the next. */
-export const MAX_DROPPED = Math.floor((MAX_DATAGRAM - HEADER - VIEW_FIXED) / DROPPED_BYTES);
+const UNIT_BYTES = 10;
+/** How many units (dropped and held together) fit in one VIEW datagram. */
+export const MAX_VIEW_UNITS = Math.floor((MAX_DATAGRAM - HEADER - VIEW_FIXED - 2) / UNIT_BYTES);
 
+function putUnit(b: Buffer, at: number, u: UnitId): void {
+  b[at] = u.kind;
+  b[at + 1] = u.level;
+  b.writeUInt32BE(u.x, at + 2);
+  b.writeUInt32BE(u.y, at + 6);
+}
+
+function getUnit(b: Buffer, at: number): UnitId {
+  return { kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6) };
+}
+
+/** Dropped units go first; held ones fill what room is left. The rest are left out. */
 export function encodeView(v: View): Buffer {
-  const dropped = v.dropped.slice(0, MAX_DROPPED);
-  const b = Buffer.alloc(VIEW_FIXED + dropped.length * DROPPED_BYTES);
+  const dropped = v.dropped.slice(0, MAX_VIEW_UNITS);
+  const held = (v.held ?? []).slice(0, MAX_VIEW_UNITS - dropped.length);
+  const heldAt = VIEW_FIXED + dropped.length * UNIT_BYTES;
+  const b = Buffer.alloc(heldAt + (held.length ? 2 + held.length * UNIT_BYTES : 0));
   b.writeDoubleBE(v.cx, 0);
   b.writeDoubleBE(v.cy, 8);
   b.writeDoubleBE(v.scale, 16);
   b.writeUInt16BE(Math.min(65535, v.screenW), 24);
   b.writeUInt16BE(Math.min(65535, v.screenH), 26);
   b.writeUInt16BE(dropped.length, 28);
-  dropped.forEach((u, i) => {
-    const at = VIEW_FIXED + i * DROPPED_BYTES;
-    b[at] = u.kind;
-    b[at + 1] = u.level;
-    b.writeUInt32BE(u.x, at + 2);
-    b.writeUInt32BE(u.y, at + 6);
-  });
+  dropped.forEach((u, i) => putUnit(b, VIEW_FIXED + i * UNIT_BYTES, u));
+  if (held.length) {
+    b.writeUInt16BE(held.length, heldAt);
+    held.forEach((u, i) => putUnit(b, heldAt + 2 + i * UNIT_BYTES, u));
+  }
   return b;
 }
 
 export function decodeView(b: Buffer): View {
   const n = b.readUInt16BE(28);
   const dropped: UnitId[] = [];
-  for (let i = 0; i < n; i++) {
-    const at = VIEW_FIXED + i * DROPPED_BYTES;
-    dropped.push({ kind: b[at], level: b[at + 1], x: b.readUInt32BE(at + 2), y: b.readUInt32BE(at + 6) });
+  for (let i = 0; i < n; i++) dropped.push(getUnit(b, VIEW_FIXED + i * UNIT_BYTES));
+  const held: UnitId[] = [];
+  const heldAt = VIEW_FIXED + n * UNIT_BYTES;
+  if (b.length >= heldAt + 2) {
+    const m = Math.min(b.readUInt16BE(heldAt), Math.floor((b.length - heldAt - 2) / UNIT_BYTES));
+    for (let i = 0; i < m; i++) held.push(getUnit(b, heldAt + 2 + i * UNIT_BYTES));
   }
   return { cx: b.readDoubleBE(0), cy: b.readDoubleBE(8), scale: b.readDoubleBE(16),
-           screenW: b.readUInt16BE(24), screenH: b.readUInt16BE(26), dropped };
+           screenW: b.readUInt16BE(24), screenH: b.readUInt16BE(26), dropped, held };
 }
 
 /**

@@ -134,7 +134,7 @@ Cada datagrama UDP lleva exactamente un mensaje: una cabecera fija de **20 bytes
 | 2 | `WELCOME` | servidor → cliente | vacío | Respuesta a `HELLO` |
 | 3 | `OPEN` | cliente → servidor | nombre de la imagen, UTF-8 | Elige la imagen |
 | 4 | `CHART` | servidor → cliente | JSON | Forma de la imagen |
-| 5 | `VIEW` | cliente → servidor | binario, 30 + 10·n bytes | Dónde mira el visor y qué descartó |
+| 5 | `VIEW` | cliente → servidor | binario, 30 + 10·n bytes (+ 2 + 10·m) | Dónde mira el visor, qué descartó y, tras reconectarse, qué conserva |
 | 6 | `REPORT` | cliente → servidor | binario, 26 + 15·n bytes | Conteos por bloque, retardo, RTT; cada 100 ms |
 | 7 | `CONFETTI` | servidor → cliente | binario, 29 + 11·b bytes | Algunos *blobs* de una unidad de *splats* |
 | 8 | `TILEPART` | servidor → cliente | binario, 23 + datos | Un trozo de un *tile* |
@@ -159,7 +159,7 @@ Cada datagrama UDP lleva exactamente un mensaje: una cabecera fija de **20 bytes
 | split | número | Nivel más fino con *splats*; `maxLevel..split` tienen *splats* |
 | detailScale | número | Píxeles de imagen por unidad de detalle real (sección 4.3) |
 
-**`VIEW`**, 30 bytes fijos más 10 por unidad descartada (hasta 115 por mensaje; el resto viaja en el siguiente):
+**`VIEW`**, 30 bytes fijos más 10 por unidad descartada y, solo tras una reconexión, 2 más 10 por unidad conservada. Caben 114 unidades entre las dos listas; los descartes van primero y lo que no cabe viaja en el siguiente VIEW:
 
 | Offset | Campo | Tipo | Significado |
 | --- | --- | --- | --- |
@@ -170,6 +170,8 @@ Cada datagrama UDP lleva exactamente un mensaje: una cabecera fija de **20 bytes
 | 26 | screenH | u16 | Alto del lienzo, píxeles |
 | 28 | n | u16 | Unidades descartadas que siguen |
 | 30 + 10·i | kind, level, x, y | u8, u8, u32, u32 | Unidad que el visor sacó de su caché: el servidor la vuelve a enviar si se necesita |
+| 30 + 10·n | m | u16 | Unidades conservadas que siguen (el campo falta si no hay ninguna) |
+| 32 + 10·n + 10·j | kind, level, x, y | u8, u8, u32, u32 | Unidad de esta vista que el visor ya tiene completa: el servidor la da por enviada y recibida |
 
 **`REPORT`**, cada 100 ms, 26 bytes fijos más 15 por bloque (hasta 76 por mensaje). Primero los bloques cuyo conteo cambió, luego los incompletos:
 
@@ -244,7 +246,7 @@ Cada datagrama UDP lleva exactamente un mensaje: una cabecera fija de **20 bytes
 
 No viaja por la red: son WebSockets entre la página y el *client half* en `127.0.0.1:8090`, por dos rutas.
 
-- **`/ws`**: la sesión de un visor, una por página. El visor envía JSON `{type:"open", image}`, `{type:"view", cx, cy, scale, w, h, dropped}` y, cada 50 ms, `{type:"consumed", bytes}` con los bytes ya procesados (base del control de flujo, sección 7.4). El *client half* reenvía `chart`, `stats`, `fault` y `link` como JSON, y los datos como frames binarios: `[1] + payload de CONFETTI` en cuanto llega cada paquete, y `[2] + level u8 + x u32 + y u32 + format u8 + archivo` cuando un *tile* está completo.
+- **`/ws`**: la sesión de un visor, una por página. El visor envía JSON `{type:"open", image}`, `{type:"view", cx, cy, scale, w, h, dropped, held}` y, cada 50 ms, `{type:"consumed", bytes}` con los bytes ya procesados (base del control de flujo, sección 7.4). El *client half* reenvía `chart`, `stats`, `fault` y `link` como JSON, y los datos como frames binarios: `[1] + payload de CONFETTI` en cuanto llega cada paquete, y `[2] + level u8 + x u32 + y u32 + format u8 + archivo` cuando un *tile* está completo.
 - **`/catalog`**: la lista de imágenes. Responde una vez `{type:"catalog", images, site}`, que el *client half* obtiene del servidor con `LIST` y `CATALOG`, y se cierra.
 
 Cada 15 s el *client half* envía un *ping* de WebSocket a cada página. Una página que no respondió al anterior (su dispositivo se durmió o desapareció sin cerrar) se cierra, junto con su sesión en el servidor.
@@ -284,7 +286,7 @@ Para cada `VIEW` el servidor calcula las unidades que cubren la vista (el nivel 
 
 - Los mensajes de control (`HELLO`, `OPEN`, el último `VIEW`) viajan por la misma ruta con pérdidas que los datos; por eso se repiten cada 300 ms hasta ver su respuesta.
 - Un `HELLO` reinicia época y secuencia, así una página nueva nunca hereda el estado de la anterior.
-- **Reconexión automática.** Si el visor pierde la conexión (un teléfono o tableta que se bloquea cierra los sockets de la página), reintenta a los 0.5, 1, 2, 4 y luego cada 8 s, y de inmediato cuando la página vuelve a estar visible o regresa la red. Conserva lo que ya tenía en memoria y la posición de la cámara; abre una sesión nueva y vuelve a pedir la vista actual.
+- **Reconexión automática.** Si el visor pierde la conexión (un teléfono o tableta que se bloquea cierra los sockets de la página), reintenta a los 0.5, 1, 2, 4 y luego cada 8 s, y de inmediato cuando la página vuelve a estar visible o regresa la red. Conserva lo que ya tenía en memoria y la posición de la cámara; abre una sesión nueva y vuelve a pedir la vista actual. Una sesión nueva no sabe nada de la página, así que el primer VIEW lleva las unidades de esa vista que el visor ya tiene completas (en memoria o en su segundo nivel), elegidas con la misma regla con que el servidor decide qué necesita una vista. El servidor las da por enviadas y recibidas y solo envía lo que falta; si la lista no cabe en un datagrama, el client half la reparte en varios VIEW seguidos. Antes la página recibía otra vez toda la vista (1.8 MB en la imagen de 24 GB, 3.6 MB en la de 93 GB); ahora, nada. El servidor solo acepta esa lista de un VIEW actual: uno atrasado podría nombrar una unidad que la página descartó después, y esa unidad no volvería a llegar.
 - **Páginas silenciosas.** El *client half* envía un *ping* a cada página cada 15 s y cierra la que no respondió al anterior, con su sesión. Así no quedan sesiones abiertas para páginas que ya no están.
 - Si los dos lados hablan versiones distintas, el servidor lo registra y el visor muestra el motivo, en lugar de quedar en negro.
 - **Límite por cliente**: el servidor procesa como máximo 60 mensajes por segundo de cada cliente (ráfagas de 120) y, aparte, 250 `ACK` por segundo (ráfagas de 500). Lo que excede se descarta sin procesar: un cliente que se comporta como inundación no consume CPU ni ancho de banda del servidor.
@@ -467,7 +469,7 @@ Las políticas fijan qué hace el sistema en cada situación; las decisiones de 
 | Reintentos de control | `HELLO`, `OPEN` y el último `VIEW`, cada 300 ms hasta su respuesta (6.4) | `client/link.ts`: `retry` |
 | Admisión | 60 mensajes/s (ráfagas de 120) y 250 `ACK`/s (ráfagas de 500) por cliente; el exceso se descarta | `server/main.ts`: `admit` |
 | Fin de sesión | `BYE`, 30 s sin mensajes, o un latido sin respuesta (6.5) | `server/main.ts`; `client/main.ts`: latido |
-| Reconexión | Reintento de 0.5 s a 8 s, inmediato al volver a ser visible; conserva caché y cámara (6.4) | `viewer/src/viewer.ts`: `connect`, `reconnectNow` |
+| Reconexión | Reintento de 0.5 s a 8 s, inmediato al volver a ser visible; conserva caché y cámara, y declara lo que conserva para no recibirlo dos veces (6.4) | `viewer/src/viewer.ts`: `connect`, `reconnectNow`, heldForView |
 | Nivel y zoom | Nivel floor(log2(scale) + 0.25); acercar hasta que una unidad de detalle real cubra 16 píxeles de pantalla (4.3) | `server/image.ts`: `levelFor`; `viewer.ts`: `magnifyLimit` |
 | Orígenes | El *client half* acepta páginas del servidor y de la propia máquina; otras solo con `--origins` | `client/main.ts`: `originAllowed` |
 

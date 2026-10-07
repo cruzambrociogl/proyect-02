@@ -433,6 +433,7 @@ function connect(): void {
     consumed = consumedSent = 0;
     dropped.length = 0;
     lastSent = "";
+    tellHeld = true;
     ws.send(JSON.stringify({ type: "open", image: imageName }));
   };
   ws.onclose = () => {
@@ -500,8 +501,52 @@ setInterval(() => {
   ws.send(JSON.stringify({ type: "consumed", bytes: consumed }));
 }, 50);
 
-let lastSent = "", lastSentAt = 0;
+let lastSent = "", lastSentAt = 0, tellHeld = false;
 connect();                                      // the first connection (state above is declared)
+
+/** A unit held whole, in memory or in the store: the server need not send it again. */
+function holdsWhole(kind: number, L: number, x: number, y: number): boolean {
+  if (kind === KIND_TILE) return tiles.has(key(L, x, y)) || store.has(cacheKey(kind, L, x, y));
+  const st = store.get(cacheKey(kind, L, x, y));
+  const u = units.get(key(L, x, y)) ?? (st && "unit" in st ? st.unit : undefined);
+  return !!u && u.got.size >= u.packets;
+}
+
+/**
+ * What this page holds of the current view, by the server's own rule for what a view needs
+ * (PreparedImage.unitsFor in server/image.ts): splat units from the top level down, each under
+ * one of the level above, and the tiles of the level the zoom wants. Tiles first, since they
+ * are the larger; then splats, coarsest first. Told once per connection: a new session on the
+ * server knows nothing of what the page kept, and sent the whole view again.
+ */
+function heldForView(): { kind: number; level: number; x: number; y: number }[] {
+  const c = M!, T = c.tile;
+  const finest = Math.max(0, Math.min(c.maxLevel, Math.floor(Math.log2(1 / cam.z) + LEVEL_BIAS)));
+  const X0 = cam.cx - canvas.width / 2 / cam.z, Y0 = cam.cy - canvas.height / 2 / cam.z;
+  const X1 = cam.cx + canvas.width / 2 / cam.z, Y1 = cam.cy + canvas.height / 2 / cam.z;
+  const out: { kind: number; level: number; x: number; y: number }[] = [];
+  const span = T * 2 ** finest, [gc, gr] = gridOf(finest);
+  for (let y = Math.max(0, Math.floor(Y0 / span)); y <= Math.min(gr - 1, Math.floor(Y1 / span)); y++) {
+    for (let x = Math.max(0, Math.floor(X0 / span)); x <= Math.min(gc - 1, Math.floor(X1 / span)); x++) {
+      if (holdsWhole(KIND_TILE, finest, x, y)) out.push({ kind: KIND_TILE, level: finest, x, y });
+    }
+  }
+  const splats: typeof out = [];
+  const visit = (L: number, x: number, y: number) => {
+    const s = 2 ** L, [w, h] = unitSize(L, x, y);
+    if ((x * T + w) * s < X0 || (y * T + h) * s < Y0 || x * T * s > X1 || y * T * s > Y1) return;
+    if (holdsWhole(KIND_SPLAT, L, x, y)) splats.push({ kind: KIND_SPLAT, level: L, x, y });
+    if (L > Math.max(finest, c.split)) {
+      const [cols, rows] = gridOf(L - 1);
+      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        if (2 * x + dx < cols && 2 * y + dy < rows) visit(L - 1, 2 * x + dx, 2 * y + dy);
+      }
+    }
+  };
+  visit(c.maxLevel, 0, 0);
+  return out.concat(splats.sort((a, b) => b.level - a.level));
+}
+
 function sendView(): void {
   if (!M || ws.readyState !== ws.OPEN) return;
   const now = performance.now();
@@ -512,7 +557,9 @@ function sendView(): void {
   if (now - lastSentAt < VIEW_EVERY_MS) { dirty = true; return; }  // try again next frame
   lastSent = sig;
   lastSentAt = now;
-  ws.send(JSON.stringify({ type: "view", ...v, dropped: dropped.splice(0, dropped.length) }));
+  const held = tellHeld ? heldForView() : [];
+  tellHeld = false;
+  ws.send(JSON.stringify({ type: "view", ...v, dropped: dropped.splice(0, dropped.length), held }));
 }
 
 // ---------------------------------------------------------------------------------------

@@ -23,7 +23,7 @@
 //
 // Browser -> client half (JSON text):
 //   {type: "open", image}                         open an image
-//   {type: "view", cx, cy, scale, w, h, dropped}  where the viewer is looking
+//   {type: "view", cx, cy, scale, w, h, dropped, held}  where the viewer is looking
 //   {type: "consumed", bytes}                     binary bytes fully handled so far (drawn,
 //                                                 or decoded for a tile): flow control
 // Client half -> browser:
@@ -99,7 +99,7 @@ async function session(ws: WebSocket): Promise<void> {
     if (msg.type === "open") own.open(String(msg.image));
     else if (msg.type === "consumed") consumed = Math.min(forwarded, Number(msg.bytes) || 0);
     else if (msg.type === "view") {
-      own.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped);
+      own.view({ cx: msg.cx, cy: msg.cy, scale: msg.scale, screenW: msg.w, screenH: msg.h }, msg.dropped, msg.held);
     }
   };
   ws.removeAllListeners("message");
